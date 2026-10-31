@@ -1,0 +1,51 @@
+# Labelling guide
+
+Consistency matters more than speed. When unsure, use the rule here; if the rule does not
+cover it, add an example to this guide so everyone labels it the same way.
+
+## Detector boxes (CVAT, label set `coil`, `person`)
+
+### `coil`: one wrapped wire-rod coil (package)
+
+* Box **every coil whose visible part is ≥ 30% of the coil** (white/blue Vedanta/BALCO wrap
+  *and* dark-wrapped coils). Draw the box tight around the **visible** part only.
+* **Do not** box coils that are fully hidden, even if you "know" they are there. Hidden
+  coils are counted through the visit log, not boxes.
+* Box coils on **both** trucks if both are visible. The bay polygon separates them at
+  export and runtime, so do not crop mentally.
+* Coils hanging from the crane or on the forklift: box them (they are coils). Placement is
+  handled by slot logic.
+* Straps or lacing over a coil: box the coil as if the straps were not there.
+* Two coils that look merged: two boxes, split at the visible seam. If no seam is visible at all,
+  one box plus an `ambiguous` CVAT tag on the frame.
+
+### `person`
+
+* Box every worker whose body is ≥ 30% visible, including people standing on the truck walls.
+  These boxes drive the occlusion logic.
+
+### Frame-level
+
+* A frame with nothing to box (empty bay, covered truck) is still **saved as a labelled
+  frame with no boxes**. It is a verified negative, and the detector needs these.
+* Frames that are unusable (blank, frozen, corrupted) get the CVAT tag `unusable` and are skipped.
+
+## Visit log (one row per truck)
+
+| Field | Definition |
+|---|---|
+| `arrived` | Truck stops in the bay (wheels stationary). |
+| `loading_start` | First coil placed on the bed. **Required for layout training.** |
+| `tarp_start` | Tarp first drawn over any coil. |
+| `tarp_done` | Bed fully covered. |
+| `departed` | Truck starts leaving the bay. |
+| `layout` | `linear` (2 columns, coils standing in rows), `criss_cross`, or `mixed` (both in one truck). |
+| `coil_count` | Final number of coils on the truck. Take it from the loading slip, dispatch note or weighbridge, not from the camera. |
+
+Times are plant local time (IST) unless an offset is written. Use the OSD clock on the
+footage. If the camera clock is off, note the offset once in `notes`.
+
+## Agreement check
+
+Double-label 10–15% of frames. Disagreements on "is this 30% visible?" or merged coils go
+into this guide as new examples, with a frame id.

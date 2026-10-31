@@ -1,0 +1,17 @@
+# Ultralytics overrides for the coil + person detector (fixed camera, bay crops).
+# Use: watchinu train --data data/ds/detect/data.yaml --model yolo26s.pt --imgsz 1280 \
+#        --hyp configs/train/detector.yaml
+cos_lr: true
+patience: 30
+hsv_h: 0.01
+hsv_s: 0.5
+hsv_v: 0.5        # strong brightness jitter: midday glare on white wraps <-> dusk / IR
+degrees: 2.0      # fixed camera: only tiny rotations are realistic
+translate: 0.1
+scale: 0.3
+shear: 0.0
+perspective: 0.0
+fliplr: 0.5
+flipud: 0.0       # trucks are never upside down
+mosaic: 1.0
+close_mosaic: 10

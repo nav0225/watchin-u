@@ -1,0 +1,11 @@
+# Ultralytics overrides for the stage and layout classifiers (bay crops).
+# Use: watchinu train --data data/ds/stage --model yolo26n-cls.pt --imgsz 224 \
+#        --hyp configs/train/classifier.yaml
+# Layout: --data data/ds/layout --model yolo26s-cls.pt --imgsz 384
+patience: 20
+hsv_h: 0.01
+hsv_s: 0.5
+hsv_v: 0.5
+fliplr: 0.5
+flipud: 0.0
+erasing: 0.3      # random erasing ~ workers occluding part of the bed

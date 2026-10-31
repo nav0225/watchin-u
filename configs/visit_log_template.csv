@@ -1,0 +1,2 @@
+visit_id,camera_id,bay_id,arrived,loading_start,tarp_start,tarp_done,departed,layout,coil_count,truck_ref,notes
+2026-10-08-01,cam01,left,2026-10-08T14:20:00,2026-10-08T14:24:00,2026-10-08T15:10:00,2026-10-08T15:24:00,2026-10-08T15:35:00,linear,10,CG04XX0000,example row - delete

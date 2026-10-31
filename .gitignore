@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+
+# Secrets — camera credentials live in the environment, never in git
+.env
+
+# Data, footage and model artefacts never go into git (use DVC / NAS)
+data/
+runs/
+*.mp4
+*.mkv
+*.avi
+*.ts
+*.pt
+*.onnx
+*.engine
+*.db

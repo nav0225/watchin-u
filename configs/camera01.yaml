@@ -1,0 +1,68 @@
+# Lacing point, Material Gate (Parsabhata Road), BALCO. Hikvision PTZ "Camera 01" (PTZ locked).
+#
+# All coordinates are NORMALISED (0..1 of width/height) so the same file works for the
+# main stream (2560x1440) and the sub-stream (640x360).
+#
+# !!! The geometry below is a FIRST ESTIMATE from a phone photo of the live view
+# !!! (08-10-2026 15:05): bed_quad was fitted to the 8 visible coil centres (2 columns x
+# !!! 4 rows, max reprojection error ~12 px at 1280x720). Re-fit it on a real main-stream
+# !!! frame before use and check it visually:
+# !!!   watchinu render-config --config configs/camera01.yaml --image <frame.jpg> --out check.png
+
+camera:
+  id: cam01
+  name: "Lacing point - Material Gate"
+  host: 10.110.4.8
+  rtsp_port: 554
+  streams:
+    main: /Streaming/Channels/101   # 2560x1440 @20 fps, H.264, H.264+ off, 6144 kbps VBR
+    sub: /Streaming/Channels/102    # 640x360 @20 fps, H.264, 1024 kbps VBR
+  credentials_env:
+    user: WATCHINU_CAM01_USER
+    password: WATCHINU_CAM01_PASSWORD
+  timezone: Asia/Kolkata
+  osd_masks:
+    - [[0.0, 0.0], [0.37, 0.0], [0.37, 0.13], [0.0, 0.13]]      # date/time overlay
+    - [[0.74, 0.82], [0.92, 0.82], [0.92, 0.93], [0.74, 0.93]]  # "Camera 01" overlay
+  static_region: [[0.45, 0.0], [1.0, 0.0], [1.0, 0.35], [0.45, 0.35]]  # shed trusses
+  reference_image: null   # set to a calibrated main-stream frame for the drift guard
+
+slot_templates:
+  std_2x5: {columns: 2, rows: 5}
+
+bays:
+  - id: left
+    # Left truck only: right edge follows the plank between the two trucks.
+    polygon: [[0.0, 0.264], [0.344, 0.264], [0.344, 0.403], [1.0, 0.819], [1.0, 1.0], [0.0, 1.0]]
+    # near-left, near-right, far-right, far-left (near end is cut off by the frame bottom)
+    bed_quad: [[0.444, 1.16], [0.831, 0.938], [0.124, 0.296], [-0.062, 0.32]]
+    slot_template: std_2x5
+
+visit:
+  open_after_s: 30
+  close_after_s: 120
+  covered_after_s: 60
+  reopen_after_s: 120
+  provisional_after_s: 120
+  max_visit_s: 10800
+  max_gap_s: 60
+  stage_min_confidence: 0.6
+
+schedule:
+  idle_interval_s: 5
+  open_interval_s: 10
+  provisional_interval_s: 10
+  checkpoint_interval_s: 600
+  change_spike: 0.10
+  change_settle: 0.03
+  lookback_s: 180
+  drift_check_interval_s: 300
+
+models:
+  stage_classifier: null    # e.g. runs/stage/v1/weights/best.pt
+  layout_classifier: null   # e.g. runs/layout/v1/weights/best.pt
+  detector: null            # e.g. runs/detect/coil-v1/weights/best.pt
+  detector_imgsz: 1280
+  stage_imgsz: 224
+  layout_imgsz: 384
+  device: cpu               # "0" for the first CUDA GPU

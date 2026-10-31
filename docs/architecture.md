@@ -1,0 +1,114 @@
+# Architecture
+
+## What the system decides
+
+For every truck laced at the lacing point (Material Gate, Parsabhata Road), before it is
+covered, the system records:
+
+* **layout**: `linear` | `criss_cross` | `mixed` | `unknown`, with confidence and vote agreement;
+* **counts**: *observed* coils, *empty* and *unseen* slots, and an *inferred total* with
+  its written basis (e.g. `8 observed + 2 unseen slot(s) assumed occupied (template std_2x5)`);
+* **needs_review** with reasons (`arrived_covered`, `layout_votes_disagree`,
+  `restarted_mid_visit`, ...);
+* an **evidence image**: the bay crop with boxes and slot markers, plus the model versions used.
+
+Observed and inferred counts are never merged. A hidden coil is reported as inferred,
+not seen.
+
+## Data flow
+
+```mermaid
+flowchart LR
+    CAM[Hikvision main stream<br/>2560x1440 @20 fps] -->|RTSP/TCP, reconnect| BUF[Latest-frame buffer<br/>drop stale, bounded latency]
+    BUF --> GUARD{View-drift guard<br/>every 5 min}
+    GUARD -->|view moved| ALERT[Alert + suspend]
+    GUARD -->|ok| OSD[Blank OSD overlays]
+    OSD --> BAY[Per-bay crop<br/>outside polygon blacked out]
+    BAY --> LIGHT[Light tier: stage classifier<br/>every 5 s idle / 10 s in visit]
+    LIGHT --> SM[Visit state machine]
+    BAY --> LB[Look-back buffer<br/>last 3 min, JPEG]
+    SM -->|scheduler wakes| HEAVY[Heavy tier: detector + layout classifier]
+    LB -->|tarp detected| HEAVY
+    HEAVY --> AGG[Visit aggregator<br/>layout votes + slot board]
+    AGG --> DEC[Provisional ~2 min / Final before tarp]
+    DEC --> DB[(PostgreSQL<br/>append-only decisions + outbox)]
+    DEC --> EV[Evidence JPEGs]
+    DB --> OUT[Outbox worker → ERP / alerts<br/>phase 2]
+```
+
+## Visit state machine (per bay)
+
+```mermaid
+stateDiagram-v2
+    [*] --> IDLE
+    IDLE --> OPEN: truck present ≥ 30 s
+    IDLE --> COVERED: arrived already tarped (flagged)
+    OPEN --> COVERED: tarp ≥ 60 s → FINAL decision from frames before the tarp
+    COVERED --> OPEN: bed open again ≥ 120 s (tarp pulled back)
+    OPEN --> IDLE: no truck ≥ 120 s (departed_uncovered, flagged)
+    COVERED --> IDLE: no truck ≥ 120 s (departed)
+    OPEN --> IDLE: max 3 h (timeout, flagged)
+```
+
+* Transitions need the condition to **hold** (debouncing). Low-confidence frames are
+  neutral, and a gap with no frames longer than `max_gap_s` breaks every run. A camera
+  outage therefore never looks like "truck left".
+* The machine runs on frame timestamps only, so recorded footage replays exactly like the live camera.
+* The state is persisted after every event (`machine_state` table). After a restart, an open
+  visit resumes and is flagged `restarted_mid_visit`, because in-memory evidence is lost.
+
+## When the heavy model runs (duty cycle)
+
+Over a 45-minute visit the heavy tier runs about 30 times, not 54,000:
+
+1. **Provisional window** (first 2 min): every 10 s. The provisional decision is emitted at about 2 min.
+2. **After each loading burst**: the change score spikes, then settles. One run per burst.
+3. **Checkpoint**: every 10 min.
+4. **Tarp detected**: once over the look-back buffer, the last 3 minutes *before* the tarp.
+   This is the final decision, built from what the bed looked like just before it was hidden.
+
+`tests/test_pipeline.py::test_heavy_model_sleeps_for_most_of_the_visit` pins this down.
+
+## Slot verification (linear loads)
+
+The bed quad (traced along the tops of the side walls) defines a homography to a unit square.
+Coil box centres are projected and binned into the template grid (2 columns × 5 rows).
+Each slot keeps its last three observations:
+
+* a slot is **visible** only if its centre is not under a worker or under a coil that
+  belongs to a nearer slot;
+* majority vote gives **occupied** or **empty**; a slot never visible stays **unseen**.
+
+## Storage rules
+
+* `decisions` is **append-only**: corrections supersede (`supersedes_id`), and human reviews
+  are separate rows. The audit trail survives disputes with vendors and customers.
+* Images live on disk or NAS. The database stores the URI plus SHA-256.
+* Results leave via a **transactional outbox**, written in the same transaction as the decision.
+* Timestamps are UTC (`timestamptz`) and displayed in IST. Schema changes go through Alembic migrations.
+* The NVR remains the continuous video archive. This system keeps only evidence.
+
+## Failure handling
+
+| Situation | Behaviour |
+|---|---|
+| Camera unreachable or stalled | Reader reconnects with exponential backoff. The state machine treats the gap as "no evidence". |
+| View moved (PTZ reset, bumped camera) | ORB match against the reference frame fails. Alert, and decisions are suspended. |
+| Truck arrives already covered | Visit opened and flagged `arrived_covered`. Final decision is `unknown`, sent for review. |
+| Tarp pulled back to fix the load | `cover_removed`. A new final decision supersedes the old one. |
+| Truck leaves without a tarp | Closed as `departed_uncovered` and flagged. |
+| Process restart mid-visit | State restored from the database. Visit flagged `restarted_mid_visit`. |
+| Workers covering the bed | Occlusion over 40% skips the layout vote. Slots under workers stay unseen. |
+| Two trucks in frame | Each bay has its own polygon and state machine. Outside-polygon pixels are blacked out. |
+
+## Code map
+
+| Path | Responsibility |
+|---|---|
+| `io/` | RTSP reader (reconnect, stall detection), latest-frame buffer, video replay |
+| `vision/` | geometry and homography, quality metrics, dHash, drift guard, overlays |
+| `runtime/` | visit state machine, scheduler, slots, aggregator, pipeline, sinks |
+| `models/` | model protocols, Ultralytics backend, fakes and visit-log oracle |
+| `store/` | SQLAlchemy schema, repository, DB sink (migrations in `/migrations`) |
+| `dataset/` | capture, extract, dedupe, visit log, splits, exports, pre-labelling |
+| `eval/` | visit-level metrics against the visit log |
