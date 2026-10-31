@@ -60,6 +60,8 @@ def train(
     }
     yolo = YOLO(model)
     yolo.train(**args)
+    if yolo.trainer is None:
+        raise RuntimeError("Ultralytics training finished without a trainer; no run directory")
     run_dir = Path(yolo.trainer.save_dir)
     provenance = {
         "created_at": datetime.now(UTC).isoformat(),
