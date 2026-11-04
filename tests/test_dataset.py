@@ -16,7 +16,7 @@ from watchinu.dataset.export import (
 )
 from watchinu.dataset.extract import extract_video
 from watchinu.dataset.manifest import read_manifest, write_manifest
-from watchinu.dataset.prelabel import prelabel_to_cvat_zip
+from watchinu.dataset.prelabel import prelabel_to_cvat_zip, write_flat_images_zip
 from watchinu.dataset.split import assign_splits, split_summary
 from watchinu.dataset.visits import (
     NOT_VISIBLE,
@@ -26,7 +26,7 @@ from watchinu.dataset.visits import (
     load_visit_log,
     visit_groups,
 )
-from watchinu.domain import BBox, Detection, Stage
+from watchinu.domain import BBox, Detection, Product, Stage
 from watchinu.io.video import VideoFileSource, parse_start_time
 from watchinu.models.fake import FunctionDetector
 
@@ -82,11 +82,13 @@ def test_dedupe_keeps_one_frame_per_static_scene(tmp_path):
     assert len(kept) == 2  # one per scene
 
 
-VISIT_CSV = """visit_id,camera_id,bay_id,arrived,loading_start,tarp_start,tarp_done,departed,layout,coil_count,truck_ref,notes
-v1,cam01,left,2026-10-31T10:00:00,2026-10-31T10:05:00,2026-10-31T10:40:00,2026-10-31T10:50:00,2026-10-31T11:00:00,linear,10,CG04AB1234,
-v2,cam01,right,2026-10-31T10:30:00,,,,2026-10-31T11:30:00,criss_cross,14,,overlaps v1
-v3,cam01,left,2026-10-31T13:00:00,,,,2026-10-31T13:45:00,linear,10,,
-v4,cam01,left,2026-11-01T09:00:00,,,,2026-11-01T09:45:00,criss_cross,,,
+VISIT_CSV = """visit_id,camera_id,bay_id,arrived,loading_start,tarp_start,tarp_done,departed,product,layout,coil_count,truck_ref,notes
+v1,cam01,left,2026-10-31T10:00:00,2026-10-31T10:05:00,2026-10-31T10:40:00,2026-10-31T10:50:00,2026-10-31T11:00:00,wire_rod,linear,10,CG04AB1234,
+v2,cam01,right,2026-10-31T10:30:00,,,,2026-10-31T11:30:00,wire_rod,criss_cross,14,,overlaps v1
+v3,cam01,left,2026-10-31T13:00:00,,,,2026-10-31T13:45:00,wire_rod,linear,10,,
+v4,cam01,left,2026-11-01T09:00:00,,,,2026-11-01T09:45:00,wire_rod,criss_cross,,,
+v5,cam01,left,2026-10-31T15:00:00,,2026-10-31T15:30:00,,2026-10-31T15:45:00,Ingot,,,,ingots
+v6,cam01,left,2026-10-31T17:00:00,,,,2026-10-31T17:45:00,,,,,product not noted
 """
 
 
@@ -100,6 +102,9 @@ def test_visit_log_parsing_and_groups(tmp_path):
     vs = visits(tmp_path)
     assert vs[0].arrived.isoformat() == f"2026-10-31T10:00:00{IST}"
     assert vs[0].coil_count == 10 and vs[3].coil_count is None
+    assert vs[0].product is Product.WIRE_ROD
+    assert vs[4].product is Product.OTHER and vs[4].product_label == "Ingot"
+    assert vs[5].product is None
     groups = visit_groups(vs)
     assert groups["v1"] == groups["v2"]  # overlapping on one camera -> same split group
     assert groups["v3"] != groups["v1"]
@@ -111,7 +116,12 @@ def test_stage_and_layout_labels_from_visit_log(tmp_path):
     at = lambda hhmm: datetime.fromisoformat(f"2026-10-31T{hhmm}:00{IST}")  # noqa: E731
     assert frame_stage(at("09:00"), "cam01", vs, m) is Stage.NO_TRUCK
     assert frame_stage(at("10:00"), "cam01", vs, m) is None  # on a transition
-    assert frame_stage(at("10:20"), "cam01", vs, m) is Stage.OPEN
+    assert frame_stage(at("10:02"), "cam01", vs, m) is Stage.OTHER_LOAD  # empty bed
+    assert frame_stage(at("10:20"), "cam01", vs, m) is Stage.WIRE_ROD
+    assert frame_stage(at("15:10"), "cam01", vs, m) is Stage.OTHER_LOAD  # ingots
+    assert frame_stage(at("15:35"), "cam01", vs, m) is Stage.COVERING
+    assert frame_stage(at("17:20"), "cam01", vs, m) is None  # product unknown
+    assert frame_layout_label(at("15:10"), "cam01", vs, m) == NOT_VISIBLE  # no wire rods
     assert frame_stage(at("10:45"), "cam01", vs, m) is Stage.COVERING
     assert frame_stage(at("10:55"), "cam01", vs, m) is Stage.COVERED
     assert frame_layout_label(at("10:02"), "cam01", vs, m) == NOT_VISIBLE  # before loading
@@ -206,8 +216,9 @@ def test_build_classification_dataset(tmp_path):
     card = build_classification_dataset(
         records, vs, out, tmp_path / "cls", "stage", boundary_margin_s=0
     )
-    assert card["splits"]["train"] == {"open": 8}
-    assert len(list((tmp_path / "cls/train/open").iterdir())) == 8
+    # v1 arrives at 10:00 with an empty bed (loading starts 10:05): not yet wire rods.
+    assert card["splits"]["train"] == {"other_load": 8}
+    assert len(list((tmp_path / "cls/train/other_load").iterdir())) == 8
     # Near-transition frames are excluded with a margin (all 8 are within 60 s of arrival).
     card = build_classification_dataset(records, vs, out, tmp_path / "cls2", "stage")
     assert card["splits"] == {}
@@ -216,7 +227,7 @@ def test_build_classification_dataset(tmp_path):
     card = build_classification_dataset(
         records, vs, out, tmp_path / "cls3", "stage", boundary_margin_s=0
     )
-    assert card["splits"]["train"] == {"open": 2}
+    assert card["splits"]["train"] == {"other_load": 2}
 
 
 def test_prelabel_writes_cvat_yolo_bundle(tmp_path):
@@ -243,3 +254,21 @@ def test_prelabel_writes_cvat_yolo_bundle(tmp_path):
         assert {"obj.names", "obj.data", "train.txt"} <= names
         label = zf.read(f"obj_train_data/{images[0].stem}.txt").decode()
     assert label == "0 0.200000 0.200000 0.200000 0.200000\n"
+    assert write_flat_images_zip(images, tmp_path / "images.zip") == 2
+    with zipfile.ZipFile(tmp_path / "images.zip") as zf:
+        assert sorted(zf.namelist()) == sorted(p.name for p in images)
+
+
+def test_clip_rows_do_not_treat_recording_bounds_as_transitions(tmp_path):
+    path = tmp_path / "clips.csv"
+    path.write_text(
+        "visit_id,camera_id,bay_id,arrived,loading_start,tarp_start,tarp_done,departed,"
+        "product,layout,coil_count,truck_ref,notes,window\n"
+        "c1,cam01,left,2026-11-04T10:00:00,,,,2026-11-04T10:00:12,wire_rod,linear,10,,,clip\n"
+    )
+    (clip,) = load_visit_log(path)
+    assert clip.clip and clip.transitions() == []
+    m = timedelta(seconds=60)  # bigger than the whole clip
+    t = datetime.fromisoformat(f"2026-11-04T10:00:05{IST}")
+    assert frame_stage(t, "cam01", [clip], m) is Stage.WIRE_ROD
+    assert frame_layout_label(t, "cam01", [clip], m) == "linear"

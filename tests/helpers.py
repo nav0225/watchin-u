@@ -13,14 +13,17 @@ BASE_CONFIG = {
         "host": "10.0.0.1",
         "credentials_env": {"user": "TEST_CAM_USER", "password": "TEST_CAM_PASSWORD"},
     },
-    "slot_templates": {"std_2x5": {"columns": 2, "rows": 5}},
+    "slot_templates": {
+        "std_2x5": {"columns": 2, "rows": 5},
+        "cc_2x7": {"columns": 2, "rows": 7},
+    },
     "bays": [
         {
             "id": "left",
             "polygon": [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
             # near-left, near-right, far-right, far-left (far end at the top of the image)
             "bed_quad": [[0.1, 0.95], [0.9, 0.95], [0.9, 0.05], [0.1, 0.05]],
-            "slot_template": "std_2x5",
+            "slot_templates": {"linear": "std_2x5", "criss_cross": "cc_2x7"},
         }
     ],
 }

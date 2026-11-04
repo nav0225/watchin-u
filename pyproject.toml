@@ -16,12 +16,15 @@ dependencies = [
     "PyYAML>=6.0",
     "SQLAlchemy>=2.0",
     "alembic>=1.13",
+    "tzdata>=2024.1",  # Windows has no system timezone database for zoneinfo
 ]
 
 [project.optional-dependencies]
 # Heavy ML stack: only needed on the training box and the inference server.
 ml = ["ultralytics>=8.4"]
 postgres = ["psycopg[binary]>=3.1"]
+# Microsoft SQL Server: also install "ODBC Driver 18 for SQL Server" on the machine.
+mssql = ["pyodbc>=5.0"]
 dev = ["pytest>=8", "ruff>=0.5", "mypy>=1.10", "types-PyYAML"]
 
 [project.scripts]

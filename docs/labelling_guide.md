@@ -39,8 +39,14 @@ cover it, add an example to this guide so everyone labels it the same way.
 | `tarp_start` | Tarp first drawn over any coil. |
 | `tarp_done` | Bed fully covered. |
 | `departed` | Truck starts leaving the bay. |
-| `layout` | `linear` (2 columns, coils standing in rows), `criss_cross`, or `mixed` (both in one truck). |
+| `product` | `wire_rod` for wrapped wire-rod coils. Anything else in plain words: `ingot`, `empty`, ... Every non-wire-rod value trains the `other_load` class. Leave it blank only if unknown (that visit's open-bed frames are then skipped). |
+| `layout` | `linear` (2 columns × 5, coils standing in rows), `criss_cross` (~2 × 7), or `mixed` (both in one truck). Blank for non-wire-rod trucks. |
 | `coil_count` | Final number of coils on the truck. Take it from the loading slip, dispatch note or weighbridge, not from the camera. |
+| `window` | `clip` when the row describes a short recording rather than a whole visit (written by `visit-log-from-clips`). Arrival and departure are then just the recording bounds. |
+
+Stage labels per frame follow automatically: `no_truck` outside visits; `other_load` for
+non-wire-rod trucks, and for a wire-rod truck before `loading_start` (empty bed); `wire_rod`
+while coils are visible; `covering` from `tarp_start`; `covered` from `tarp_done`.
 
 Times are plant local time (IST) unless an offset is written. Use the OSD clock on the
 footage. If the camera clock is off, note the offset once in `notes`.

@@ -136,8 +136,9 @@ def build_detection_dataset(
             stats[rec.split][class_names[c] if c < len(class_names) else f"class_{c}"] += 1
         used.append(rec)
 
+    # No "path": Ultralytics then resolves splits relative to this file, so the dataset
+    # folder stays valid when copied from a laptop to Google Drive / Colab / the server.
     data_yaml = {
-        "path": str(out_dir.resolve()),
         "train": "images/train",
         "val": "images/val",
         "test": "images/test",

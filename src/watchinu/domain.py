@@ -11,24 +11,38 @@ import numpy as np
 class Stage(StrEnum):
     """Coarse visit stage, predicted per frame by the light (Tier-1) classifier.
 
-    Loading and lacing are deliberately one class (``OPEN``): both show an open bed and
-    are hard to tell apart from a single frame. Activity is measured separately with the
-    change score.
+    ``WIRE_ROD`` = truck in the bay with wrapped wire-rod coils visible on an open bed.
+    ``OTHER_LOAD`` = truck with anything else (ingots, empty bed, other products): the
+    visit is recorded but the heavy model never wakes for it. Loading and lacing are one
+    class: both show an open bed. Activity is measured separately with the change score.
     """
 
     NO_TRUCK = "no_truck"
-    OPEN = "open"
+    WIRE_ROD = "wire_rod"
+    OTHER_LOAD = "other_load"
     COVERING = "covering"
     COVERED = "covered"
     UNKNOWN = "unknown"
 
     @property
     def truck_present(self) -> bool:
-        return self in (Stage.OPEN, Stage.COVERING, Stage.COVERED)
+        return self in (Stage.WIRE_ROD, Stage.OTHER_LOAD, Stage.COVERING, Stage.COVERED)
+
+    @property
+    def bed_open(self) -> bool:
+        return self in (Stage.WIRE_ROD, Stage.OTHER_LOAD)
 
     @property
     def tarp_on(self) -> bool:
         return self in (Stage.COVERING, Stage.COVERED)
+
+
+class Product(StrEnum):
+    """What the truck carries, decided from the light tier's votes during the visit."""
+
+    WIRE_ROD = "wire_rod"
+    OTHER = "other"
+    UNKNOWN = "unknown"
 
 
 class Layout(StrEnum):
@@ -103,13 +117,19 @@ class Frame:
 
 @dataclass(slots=True)
 class CountSummary:
-    """Coil count for one visit. Observed and inferred counts are kept apart on purpose."""
+    """Coil count for one visit. Observed and inferred counts are kept apart on purpose.
+
+    ``unseen_slots`` are inside the camera view but hidden (workers, nearer coils);
+    ``out_of_view_slots`` lie outside the camera view (load cut off by the image edge).
+    """
 
     observed: int
     empty_slots: int
     unseen_slots: int
     inferred_total: int | None
     basis: str
+    out_of_view_slots: int = 0
+    template: str | None = None
 
 
 @dataclass(slots=True)
@@ -124,5 +144,6 @@ class Decision:
     n_layout_votes: int
     counts: CountSummary
     needs_review: bool
+    product: Product = Product.UNKNOWN
     reasons: list[str] = field(default_factory=list)
     model_versions: dict[str, str] = field(default_factory=dict)

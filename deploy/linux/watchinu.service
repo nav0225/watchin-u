@@ -1,0 +1,19 @@
+# systemd unit: copy to /etc/systemd/system/, then
+#   sudo systemctl daemon-reload && sudo systemctl enable --now watchinu
+[Unit]
+Description=watchin-u lacing point monitor (camera -> decisions)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=watchinu
+WorkingDirectory=/opt/watchin-u
+# .env is read by the program itself; keep it chmod 600 and owned by the service user.
+ExecStart=/opt/watchin-u/.venv/bin/watchinu run --config configs/camera01.yaml --log data/events.jsonl
+Restart=always
+RestartSec=10
+# The visit state is persisted in the database, so a restart resumes open visits.
+
+[Install]
+WantedBy=multi-user.target

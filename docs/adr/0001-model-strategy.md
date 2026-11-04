@@ -7,8 +7,9 @@
 
 We must recognise, from one fixed Hikvision camera at the BALCO lacing point:
 
-1. the **visit stage** of a truck (no truck / open bed / tarp going on / covered);
-2. the **coil arrangement** (linear 2×5 vs criss-cross vs mixed);
+1. the **visit stage** of a truck (no truck / wrapped wire rods / other load such as ingots /
+   tarp going on / covered). The heavy model only ever wakes for wire-rod trucks;
+2. the **coil arrangement** (linear 2×5 = 10 vs criss-cross ~2×7 = 14 vs mixed);
 3. the **visible coil count** and which template slots are occupied.
 
 No public model detects wrapped wire-rod coils. The footage is a narrow domain: one
@@ -23,7 +24,7 @@ each with one job:
 
 | Role | Base model | Input | Why |
 |---|---|---|---|
-| Stage classifier (light tier, runs every 5–10 s) | `yolo26n-cls` (ImageNet) | bay crop, 224 px | Tiny and cheap. The stage is obvious even at sub-stream quality. |
+| Stage classifier (light tier, runs every 5–10 s) | `yolo26n-cls` (ImageNet) | bay crop, 224 px | Tiny and cheap. Classes `no_truck`, `wire_rod`, `other_load`, `covering`, `covered`. Wrapped coils and ingots look very different. |
 | Layout classifier (heavy tier) | `yolo26s-cls` (ImageNet) | bay crop, 384 px | Arrangement is a whole-image pattern. |
 | Coil + person detector (heavy tier) | `yolo26s` (COCO) | bay crop, 1280 px | `person` is already learned. Coils are large, few objects. |
 

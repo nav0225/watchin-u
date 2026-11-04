@@ -1,14 +1,15 @@
-"""Slot-based verification of a linear (template) load.
+"""Slot-based verification of a templated load (linear 2x5, criss-cross 2x7, ...).
 
 Coil box centres are projected onto the bed plane (unit square) and binned into the
-template grid, e.g. 2 columns x 5 rows. Each slot then accumulates evidence over time:
+template grid. Each slot then accumulates evidence over time:
 
-* OCCUPIED - a coil was seen in it (majority of the recent observations);
-* EMPTY    - the slot was visible and repeatedly had no coil;
-* UNSEEN   - never visible (hidden by workers, by nearer coils, or at the far end).
+* OCCUPIED    - a coil was seen in it (majority of the recent observations);
+* EMPTY       - the slot was visible and repeatedly had no coil;
+* UNSEEN      - inside the camera view but never visible (workers, nearer coils);
+* OUT_OF_VIEW - its centre lies outside the camera view (load cut off by the image edge).
 
-Observed and inferred counts are reported separately; an UNSEEN slot is only counted
-as occupied when inference is explicitly enabled, and the basis is recorded.
+Observed and inferred counts are reported separately; UNSEEN / OUT_OF_VIEW slots are only
+counted as occupied when inference is explicitly enabled, and the basis is recorded.
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ class SlotStatus(StrEnum):
     OCCUPIED = "occupied"
     EMPTY = "empty"
     UNSEEN = "unseen"
+    OUT_OF_VIEW = "out_of_view"
 
 
 def all_slots(template: SlotTemplate) -> list[Slot]:
@@ -52,16 +54,41 @@ def slot_centres_uv(template: SlotTemplate) -> dict[Slot, tuple[float, float]]:
     }
 
 
+def slot_image_points(
+    homography: BedHomography, template: SlotTemplate
+) -> dict[Slot, tuple[float, float]]:
+    """Slot centres in image coordinates."""
+    centres = slot_centres_uv(template)
+    pts = homography.to_image(np.array(list(centres.values()), dtype=np.float32))
+    return {s: (float(x), float(y)) for s, (x, y) in zip(centres, pts, strict=True)}
+
+
+def _in_view(x: float, y: float, view_mask: np.ndarray | None) -> bool:
+    if view_mask is None:
+        return True
+    h, w = view_mask.shape[:2]
+    xi, yi = int(x), int(y)
+    return 0 <= xi < w and 0 <= yi < h and bool(view_mask[yi, xi])
+
+
+def out_of_view_slots(
+    points: dict[Slot, tuple[float, float]], view_mask: np.ndarray | None
+) -> set[Slot]:
+    return {s for s, (x, y) in points.items() if not _in_view(x, y, view_mask)}
+
+
 def observe_slots(
     coils: list[BBox],
     persons: list[BBox],
     homography: BedHomography,
     template: SlotTemplate,
+    view_mask: np.ndarray | None = None,
 ) -> tuple[set[Slot], set[Slot]]:
     """Return (occupied, visible) slots for one frame.
 
-    A slot without a coil counts as *visible* only if its image-space centre is not
-    covered by a worker or by a coil that belongs to a different (nearer) slot.
+    A slot without a coil counts as *visible* (i.e. seen empty) only if its image-space
+    centre is inside the camera view / bay polygon and not covered by a worker or by a
+    coil that belongs to a different (nearer) slot.
     """
     assigned: list[tuple[BBox, Slot]] = []
     if coils:
@@ -72,24 +99,27 @@ def observe_slots(
                 assigned.append((box, slot))
     occupied = {slot for _, slot in assigned}
 
-    centres = slot_centres_uv(template)
-    order = list(centres)
-    img_pts = homography.to_image(np.array([centres[s] for s in order], dtype=np.float32))
     visible = set(occupied)
-    for slot, (x, y) in zip(order, img_pts, strict=True):
-        if slot in occupied:
+    for slot, (x, y) in slot_image_points(homography, template).items():
+        if slot in occupied or not _in_view(x, y, view_mask):
             continue
-        if any(p.contains(float(x), float(y)) for p in persons):
+        if any(p.contains(x, y) for p in persons):
             continue
-        if any(b.contains(float(x), float(y)) for b, s in assigned if s != slot):
+        if any(b.contains(x, y) for b, s in assigned if s != slot):
             continue
         visible.add(slot)
     return occupied, visible
 
 
 class SlotBoard:
-    def __init__(self, template: SlotTemplate, history: int = 3) -> None:
+    def __init__(
+        self,
+        template: SlotTemplate,
+        history: int = 3,
+        out_of_view: set[Slot] | None = None,
+    ) -> None:
         self.template = template
+        self.out_of_view = set(out_of_view or ())
         self._obs: dict[Slot, deque[bool]] = {s: deque(maxlen=history) for s in all_slots(template)}
 
     def update(self, occupied: Iterable[Slot], visible: Iterable[Slot]) -> None:
@@ -101,7 +131,7 @@ class SlotBoard:
     def status(self, slot: Slot) -> SlotStatus:
         obs = self._obs[slot]
         if not obs:
-            return SlotStatus.UNSEEN
+            return SlotStatus.OUT_OF_VIEW if slot in self.out_of_view else SlotStatus.UNSEEN
         hits = sum(obs)
         misses = len(obs) - hits
         if hits == misses:  # tie: trust the latest observation
@@ -112,17 +142,21 @@ class SlotBoard:
         return {s: self.status(s) for s in self._obs}
 
     def summary(self, infer_unseen: bool, template_name: str) -> CountSummary:
-        st = self.statuses().values()
-        observed = sum(1 for s in st if s is SlotStatus.OCCUPIED)
-        empty = sum(1 for s in st if s is SlotStatus.EMPTY)
-        unseen = sum(1 for s in st if s is SlotStatus.UNSEEN)
+        st = list(self.statuses().values())
+        observed = st.count(SlotStatus.OCCUPIED)
+        empty = st.count(SlotStatus.EMPTY)
+        unseen = st.count(SlotStatus.UNSEEN)
+        oov = st.count(SlotStatus.OUT_OF_VIEW)
         if infer_unseen and observed > 0:
-            inferred = observed + unseen
+            inferred: int | None = observed + unseen + oov
             basis = (
-                f"{observed} observed + {unseen} unseen slot(s) assumed occupied "
-                f"(template {template_name}, {empty} seen empty)"
+                f"{observed} observed + {unseen} hidden + {oov} outside camera view, "
+                f"assumed occupied (template {template_name}, {empty} seen empty)"
             )
         else:
             inferred = None
-            basis = f"{observed} observed, {unseen} unseen, {empty} empty (no inference)"
-        return CountSummary(observed, empty, unseen, inferred, basis)
+            basis = (
+                f"{observed} observed, {unseen} hidden, {oov} outside camera view, "
+                f"{empty} empty (no inference)"
+            )
+        return CountSummary(observed, empty, unseen, inferred, basis, oov, template_name)

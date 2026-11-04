@@ -75,6 +75,7 @@ class Repository:
             row = DecisionRow(
                 visit_id=visit_id,
                 kind=decision.kind,
+                product=decision.product.value,
                 decided_at=from_epoch(decision.ts),
                 layout=decision.layout.value,
                 layout_confidence=decision.layout_confidence,
@@ -83,6 +84,8 @@ class Repository:
                 observed_count=c.observed,
                 empty_slots=c.empty_slots,
                 unseen_slots=c.unseen_slots,
+                out_of_view_slots=c.out_of_view_slots,
+                count_template=c.template,
                 inferred_total=c.inferred_total,
                 inference_basis=c.basis,
                 needs_review=decision.needs_review,
@@ -108,6 +111,7 @@ class Repository:
                     payload={
                         "visit_id": visit_id,
                         "decision_id": row.id,
+                        "product": decision.product.value,
                         "layout": decision.layout.value,
                         "observed_count": c.observed,
                         "inferred_total": c.inferred_total,

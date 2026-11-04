@@ -14,12 +14,12 @@ from dataclasses import dataclass
 import numpy as np
 
 from watchinu.config import AppConfig, BayConfig
-from watchinu.domain import BBox, Decision, Frame, Stage
+from watchinu.domain import BBox, Decision, Frame, Layout, Stage
 from watchinu.models.base import ModelSet
-from watchinu.runtime.aggregator import VisitAggregator
+from watchinu.runtime.aggregator import SlotObservations, TemplateSpec, VisitAggregator
 from watchinu.runtime.scheduler import HeavyScheduler
 from watchinu.runtime.sinks import EventSink
-from watchinu.runtime.slots import observe_slots, slot_centres_uv
+from watchinu.runtime.slots import observe_slots, out_of_view_slots, slot_image_points
 from watchinu.runtime.visit_machine import EventKind, VisitEvent, VisitState, VisitStateMachine
 from watchinu.vision.drift import ViewDriftChecker
 from watchinu.vision.geometry import (
@@ -44,7 +44,7 @@ class _Geometry:
     size: tuple[int, int]
     rect: tuple[int, int, int, int]
     poly_local: np.ndarray
-    mask_local: np.ndarray
+    mask_local: np.ndarray  # 255 inside the bay polygon (and therefore inside the frame)
     homography: BedHomography
 
     def crop(self, image: np.ndarray) -> np.ndarray:
@@ -78,7 +78,10 @@ class BayProcessor:
     ) -> None:
         self.cfg = cfg
         self.bay = bay
-        self.template = cfg.template_for(bay)
+        self.templates = {
+            Layout(layout): (name, template)
+            for layout, (name, template) in cfg.templates_for(bay).items()
+        }
         self.models = models
         self.sink = sink
         self.machine = (
@@ -103,9 +106,19 @@ class BayProcessor:
             assert self.aggregator is not None
             self.aggregator.flag("restarted_mid_visit")
 
+    def _template_specs(self) -> dict[Layout, TemplateSpec]:
+        specs = {}
+        for layout, (name, template) in self.templates.items():
+            oov: frozenset = frozenset()
+            if self._geom is not None:
+                points = slot_image_points(self._geom.homography, template)
+                oov = frozenset(out_of_view_slots(points, self._geom.mask_local))
+            specs[layout] = TemplateSpec(name, template, oov)
+        return specs
+
     def _new_aggregator(self) -> None:
         self.aggregator = VisitAggregator(
-            self.cfg.decision, self.template, self.bay.slot_template, self.models.versions()
+            self.cfg.decision, self._template_specs(), self.models.versions()
         )
         self.scheduler.reset()
         self._lookback.clear()
@@ -133,8 +146,12 @@ class BayProcessor:
         for event in self.machine.step(ts, stage, conf):
             self._handle(event)
 
-        if self.machine.state is VisitState.OPEN and stage is Stage.OPEN:
-            self._watch(ts, crop, geom)
+        if self.machine.state is VisitState.OPEN and self.aggregator is not None:
+            if conf >= self.cfg.visit.stage_min_confidence:
+                self.aggregator.add_stage(ts, stage)
+            # Only trucks carrying wrapped wire rods ever wake the heavy tier.
+            if stage is Stage.WIRE_ROD:
+                self._watch(ts, crop, geom)
 
     def _watch(self, ts: float, crop: np.ndarray, geom: _Geometry) -> None:
         thumb = thumbnail(crop)
@@ -146,7 +163,9 @@ class BayProcessor:
             self._lookback.popleft()
 
         opened_at = self.machine.opened_at
-        assert opened_at is not None
+        assert opened_at is not None and self.aggregator is not None
+        if not self.aggregator.product_confirmed():
+            return
         if self.scheduler.should_run(ts, opened_at, change):
             self.scheduler.mark_run(ts)
             self._heavy(ts, crop, geom)
@@ -177,23 +196,26 @@ class BayProcessor:
         if self.models.layout is not None and occlusion <= self.cfg.quality.max_occlusion_fraction:
             layout_probs = self.models.layout.classify(crop)
 
+        slots: SlotObservations = {}
         if self.models.detector is not None:
-            occupied, visible = observe_slots(coils, persons, geom.homography, self.template)
-        else:
-            occupied, visible = set(), set()
-        self.aggregator.add_observation(ts, layout_probs, len(coils), occupied, visible)
+            for layout, (_, template) in self.templates.items():
+                slots[layout] = observe_slots(
+                    coils, persons, geom.homography, template, geom.mask_local
+                )
+        self.aggregator.add_observation(ts, layout_probs, len(coils), slots)
 
         score = len(coils) - 10.0 * occlusion
         if self._best is None or score >= self._best.score:
             annotated = crop.copy()
             draw_boxes(annotated, coils, "coil")
             draw_boxes(annotated, persons, "person")
-            centres = slot_centres_uv(self.template)
-            pts = geom.homography.to_image(np.array(list(centres.values()), dtype=np.float32))
+            shown = self.aggregator.leading_layout()
+            if shown not in self.templates:
+                shown = next(iter(self.templates))
             draw_slots(
                 annotated,
-                {s: (float(x), float(y)) for s, (x, y) in zip(centres, pts, strict=True)},
-                occupied,
+                slot_image_points(geom.homography, self.templates[shown][1]),
+                slots.get(shown, (set(), set()))[0],
             )
             self._best = _Evidence(score, encode_jpeg(annotated))
 
@@ -251,6 +273,9 @@ class BayProcessor:
             mask_local = polygon_mask(poly_local, (rect[3] - rect[1], rect[2] - rect[0]))
             quad_local = to_pixels(self.bay.bed_quad, w, h) - offset
             self._geom = _Geometry((w, h), rect, poly_local, mask_local, BedHomography(quad_local))
+            if self.aggregator is not None:  # e.g. restored before the first frame
+                for layout, spec in self._template_specs().items():
+                    self.aggregator.boards[layout].out_of_view = set(spec.out_of_view)
         return self._geom
 
     def _stage(self, crop: np.ndarray) -> tuple[Stage, float]:

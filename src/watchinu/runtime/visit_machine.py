@@ -102,7 +102,7 @@ class VisitStateMachine:
         gap = self.cfg.max_gap_s
         self._present.observe(ts, stage.truck_present if known else None, gap)
         self._tarp.observe(ts, stage.tarp_on if known else None, gap)
-        self._open_bed.observe(ts, stage is Stage.OPEN if known else None, gap)
+        self._open_bed.observe(ts, stage.bed_open if known else None, gap)
         self._absent.observe(ts, stage is Stage.NO_TRUCK if known else None, gap)
 
         events: list[VisitEvent] = []

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from watchinu.dataset.visits import VisitLabel
+from watchinu.domain import Product
 
 
 @dataclass(slots=True)
@@ -23,6 +24,7 @@ class PredictedVisit:
     bay_id: str
     opened_ts: float
     closed_ts: float | None = None
+    product: str = "unknown"
     layout: str = "unknown"
     observed: int | None = None
     inferred_total: int | None = None
@@ -46,6 +48,7 @@ def load_predictions(jsonl_path: str | Path) -> list[PredictedVisit]:
                 if d["kind"] != "final":
                     continue
                 v = visits[vid]
+                v.product = d.get("product", "unknown")
                 v.layout = d["layout"]
                 v.observed = d["counts"]["observed"]
                 v.inferred_total = d["counts"]["inferred_total"]
@@ -86,13 +89,23 @@ def evaluate(
 ) -> dict[str, Any]:
     pairs, spurious = match_visits(preds, gts, tolerance_s)
     matched = [(g, p) for g, p in pairs if p is not None]
-    layout_pairs = [(g, p) for g, p in matched if g.layout is not None]
+
+    # Product gate: did ingot / other trucks stay out of the wire-rod checks?
+    product_pairs = [(g, p) for g, p in matched if g.product is not None]
+    product_correct = sum(1 for g, p in product_pairs if g.product and g.product.value == p.product)
+    product_confusion: Counter[str] = Counter(
+        f"{g.product.value if g.product else '?'} -> {p.product}" for g, p in product_pairs
+    )
+
+    # Layout and count are only meaningful for wire-rod trucks.
+    wire_rod = [(g, p) for g, p in matched if g.product in (Product.WIRE_ROD, None)]
+    layout_pairs = [(g, p) for g, p in wire_rod if g.layout is not None]
     confusion: Counter[str] = Counter(
         f"{g.layout.value if g.layout else '?'} -> {p.layout}" for g, p in layout_pairs
     )
     layout_correct = sum(1 for g, p in layout_pairs if g.layout and g.layout.value == p.layout)
 
-    count_pairs = [(g, p) for g, p in matched if g.coil_count is not None]
+    count_pairs = [(g, p) for g, p in wire_rod if g.coil_count is not None]
     errors: list[int] = []
     exact = observed_le_true = 0
     for g, p in count_pairs:
@@ -115,10 +128,13 @@ def evaluate(
         "visits_missed": len(gts) - len(matched),
         "visits_spurious": len(spurious),
         "visit_recall": rate(len(matched), len(gts)),
+        "product_evaluated": len(product_pairs),
+        "product_accuracy": rate(product_correct, len(product_pairs)),
+        "product_confusion": dict(sorted(product_confusion.items())),
         "layout_evaluated": len(layout_pairs),
         "layout_accuracy": rate(layout_correct, len(layout_pairs)),
         "layout_unknown_rate": rate(
-            sum(1 for _, p in matched if p.layout == "unknown"), len(matched)
+            sum(1 for _, p in wire_rod if p.layout == "unknown"), len(wire_rod)
         ),
         "layout_confusion": dict(sorted(confusion.items())),
         "count_evaluated": len(errors),
@@ -132,9 +148,11 @@ def evaluate(
 def to_markdown(report: dict[str, Any]) -> str:
     lines = ["# Visit-level evaluation", "", "| Metric | Value |", "|---|---|"]
     for key, value in report.items():
-        if key == "layout_confusion":
+        if key.endswith("_confusion"):
             continue
         lines.append(f"| {key} | {value} |")
-    lines += ["", "## Layout confusion (ground truth -> predicted)", ""]
-    lines += [f"- {k}: {v}" for k, v in report.get("layout_confusion", {}).items()] or ["- none"]
+    for name in ("product", "layout"):
+        lines += ["", f"## {name.title()} confusion (ground truth -> predicted)", ""]
+        items = report.get(f"{name}_confusion", {}).items()
+        lines += [f"- {k}: {v}" for k, v in items] or ["- none"]
     return "\n".join(lines) + "\n"

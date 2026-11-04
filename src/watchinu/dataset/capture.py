@@ -1,4 +1,10 @@
-"""Lossless RTSP recorder: ffmpeg stream-copy into time-stamped segments, auto-restart.
+"""RTSP recorders (ffmpeg, auto-restart): lossless video segments or a JPEG time-lapse.
+
+Video (``build_capture_cmd``) keeps every frame; use it for short clips and NVR-like
+evidence. Time-lapse (``build_timelapse_cmd``) keeps one high-quality JPEG every few
+seconds: a full 40-minute visit at 10 s is 240 frames. At 2560x1440 a frame is roughly
+0.5-1.2 MB, i.e. ~0.2-0.45 GB/h at 10 s versus ~2.8 GB/h of video - and it is exactly what
+the stage/layout models and the trigger logic consume (the runtime samples every 5-10 s).
 
 * ``-c copy``: no re-encoding, so recorded data is bit-identical to what the live
   pipeline will decode (train/inference parity) and costs almost no CPU.
@@ -62,18 +68,47 @@ def build_capture_cmd(
     ]
 
 
-def run_capture(
+def build_timelapse_cmd(
     url: str,
     out_dir: str | Path,
     camera_id: str,
     stream: str,
-    segment_s: int = 300,
-    max_backoff_s: float = 60.0,
+    every_s: float = 10.0,
     ffmpeg: str = "ffmpeg",
-) -> None:
-    """Record until interrupted, restarting ffmpeg with exponential backoff on failure."""
+) -> list[str]:
+    """One JPEG (quality ~95) every ``every_s`` seconds, named by local wall-clock time."""
+    if every_s < 2:
+        raise ValueError("time-lapse interval must be >= 2 s (file names have 1 s resolution)")
+    pattern = str(Path(out_dir) / f"{camera_id}_{stream}_%Y%m%dT%H%M%S.jpg")
+    return [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "warning",
+        "-nostdin",
+        "-rtsp_transport",
+        "tcp",
+        "-timeout",
+        "10000000",
+        "-i",
+        url,
+        "-map",
+        "0:v:0",
+        "-vf",
+        f"fps=1/{every_s:g}",
+        "-q:v",
+        "2",
+        "-f",
+        "image2",
+        "-strftime",
+        "1",
+        pattern,
+    ]
+
+
+def run_capture(cmd: list[str], out_dir: str | Path, max_backoff_s: float = 60.0) -> None:
+    """Run a recorder command until interrupted, restarting it with exponential backoff."""
     Path(out_dir).mkdir(parents=True, exist_ok=True)
-    cmd = build_capture_cmd(url, out_dir, camera_id, stream, segment_s, ffmpeg)
     safe = [redact(c) for c in cmd]
     backoff = 1.0
     while True:

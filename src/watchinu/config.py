@@ -86,7 +86,18 @@ class BayConfig(_Strict):
     # near-right, far-right, far-left (as seen from the camera). Corners may lie slightly
     # outside the frame when the truck's end is cut off by the image edge.
     bed_quad: Annotated[list[Point], Field(min_length=4, max_length=4)]
-    slot_template: str
+    # Layout -> slot template, e.g. {linear: std_2x5, criss_cross: cc_2x7}. A layout with
+    # no template (e.g. mixed) falls back to a robust per-frame detection count.
+    slot_templates: dict[str, str] = Field(min_length=1)
+
+    @field_validator("slot_templates")
+    @classmethod
+    def _layouts(cls, v: dict[str, str]) -> dict[str, str]:
+        allowed = {"linear", "criss_cross", "mixed"}
+        unknown = set(v) - allowed
+        if unknown:
+            raise ValueError(f"unknown layout(s) {sorted(unknown)}; use {sorted(allowed)}")
+        return v
 
     @field_validator("polygon")
     @classmethod
@@ -138,6 +149,11 @@ class DecisionConfig(_Strict):
     infer_unseen_slots: bool = True
     slot_history: int = 3
     coil_min_confidence: float = 0.4
+    # Product gate: the heavy model wakes only after this many light-tier frames have
+    # confirmed wrapped wire rods on the bed (at 10 s cadence: ~30 s of confirmation).
+    min_wire_rod_votes: int = 3
+    # Wire-rod share of open-bed frames within +/- this band of 0.5 -> product uncertain.
+    product_uncertain_band: float = 0.2
 
 
 class DriftConfig(_Strict):
@@ -184,8 +200,11 @@ class AppConfig(_Strict):
         if len(ids) != len(set(ids)):
             raise ValueError("bay ids must be unique")
         for bay in self.bays:
-            if bay.slot_template not in self.slot_templates:
-                raise ValueError(f"bay {bay.id!r} uses unknown slot template {bay.slot_template!r}")
+            for layout, name in bay.slot_templates.items():
+                if name not in self.slot_templates:
+                    raise ValueError(
+                        f"bay {bay.id!r} uses unknown slot template {name!r} for {layout}"
+                    )
         return self
 
     def bay(self, bay_id: str) -> BayConfig:
@@ -194,8 +213,11 @@ class AppConfig(_Strict):
                 return bay
         raise KeyError(f"unknown bay {bay_id!r}")
 
-    def template_for(self, bay: BayConfig) -> SlotTemplate:
-        return self.slot_templates[bay.slot_template]
+    def templates_for(self, bay: BayConfig) -> dict[str, tuple[str, SlotTemplate]]:
+        """Layout value -> (template name, template) for one bay."""
+        return {
+            layout: (name, self.slot_templates[name]) for layout, name in bay.slot_templates.items()
+        }
 
 
 def load_config(path: str | Path) -> AppConfig:

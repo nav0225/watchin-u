@@ -36,6 +36,7 @@ class FrameRecord(BaseModel):
     duplicate_of: str | None = None
     visit_id: str | None = None
     split: str | None = None
+    source_image: str | None = None  # set for time-lapse JPEGs (``video`` is then a day key)
 
     @property
     def day(self) -> str | None:

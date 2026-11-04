@@ -4,42 +4,61 @@ from __future__ import annotations
 
 import numpy as np
 
-from watchinu.domain import BBox, Detection, Frame, Layout
+from watchinu.domain import BBox, Detection, Frame, Layout, Product
 from watchinu.models.base import ModelSet
 from watchinu.models.fake import FunctionClassifier, FunctionDetector
 from watchinu.runtime.pipeline import CameraProcessor
 from watchinu.runtime.sinks import MemorySink
-from watchinu.runtime.slots import slot_centres_uv
+from watchinu.runtime.slots import slot_image_points
 from watchinu.vision.drift import DriftResult
 from watchinu.vision.geometry import BedHomography, to_pixels
 
-from .helpers import make_config, textured
+from .helpers import BASE_CONFIG, make_config, textured
 
-CODES = {"no_truck": 40, "open": 100, "covering": 160, "covered": 210}
+# Synthetic frames encode the stage in their mean brightness.
+CODES = {"no_truck": 30, "wire_rod": 80, "other_load": 130, "covering": 175, "covered": 220}
 W, H = 320, 180
 
 
 def stage_from_image(image: np.ndarray) -> dict[str, float]:
     mean = float(image.mean())
     label = min(CODES, key=lambda k: abs(CODES[k] - mean))
-    return {label: 0.95, **{k: 0.05 / 3 for k in CODES if k != label}}
+    return {label: 0.95, **{k: 0.05 / 4 for k in CODES if k != label}}
 
 
-def make_models(cfg, n_coils: int = 10, layout: str = "linear") -> ModelSet:
+class Counting:
+    """Wraps a fake model and records the timestamp-free call count."""
+
+    def __init__(self, inner):
+        self.inner, self.calls = inner, 0
+        self.name, self.version = inner.name, inner.version
+
+    def classify(self, img):
+        self.calls += 1
+        return self.inner.classify(img)
+
+    def detect(self, img):
+        self.calls += 1
+        return self.inner.detect(img)
+
+
+def make_models(cfg, n_coils: int = 10, layout: str = "linear", extra=()) -> ModelSet:
     bay = cfg.bays[0]
-    homography = BedHomography(to_pixels(bay.bed_quad, W, H))
-    centres = slot_centres_uv(cfg.template_for(bay))
-    pts = homography.to_image(np.array(list(centres.values()), np.float32))[:n_coils]
+    template = cfg.templates_for(bay)[layout][1]
+    points = slot_image_points(BedHomography(to_pixels(bay.bed_quad, W, H)), template)
+    pts = [p for p in points.values() if 0 <= p[1] < H][:n_coils] + list(extra)
 
     def detect(image: np.ndarray) -> list[Detection]:
-        if abs(float(image.mean()) - CODES["open"]) > 20:
+        if abs(float(image.mean()) - CODES["wire_rod"]) > 20:
             return []
-        return [Detection("coil", 0.9, BBox(x - 6, y - 6, x + 6, y + 6)) for x, y in pts]
+        return [
+            Detection("coil", 0.9, BBox(x - 6, y - 6, x + 6, min(y + 6, H - 1))) for x, y in pts
+        ]
 
     return ModelSet(
         stage=FunctionClassifier(stage_from_image, "stage"),
-        layout=FunctionClassifier(lambda img: {layout: 0.9, "criss_cross": 0.1}, "layout"),
-        detector=FunctionDetector(detect, "det"),
+        layout=FunctionClassifier(lambda img: {layout: 0.9, "mixed": 0.1}, "layout"),
+        detector=Counting(FunctionDetector(detect, "det")),
     )
 
 
@@ -56,7 +75,13 @@ def run(cfg, models, timeline, step: float = 5.0, processor=None, sink=None):
     return sink, camera
 
 
-NORMAL = [("no_truck", 60), ("open", 900), ("covering", 120), ("covered", 300), ("no_truck", 300)]
+NORMAL = [
+    ("no_truck", 60),
+    ("wire_rod", 900),
+    ("covering", 120),
+    ("covered", 300),
+    ("no_truck", 300),
+]
 
 
 def test_full_visit_produces_provisional_and_final_decisions():
@@ -91,35 +116,62 @@ def test_partially_visible_load_reports_observed_and_inferred_separately():
 def test_heavy_model_sleeps_for_most_of_the_visit():
     cfg = make_config()
     models = make_models(cfg)
-    calls = {"stage": 0, "detector": 0}
-    stage_fn, det = models.stage, models.detector
-
-    class Counting:
-        name, version = "c", "1"
-
-        def __init__(self, inner, key):
-            self.inner, self.key = inner, key
-
-        def classify(self, img):
-            calls[self.key] += 1
-            return self.inner.classify(img)
-
-        def detect(self, img):
-            calls[self.key] += 1
-            return self.inner.detect(img)
-
-    models.stage, models.detector = Counting(stage_fn, "stage"), Counting(det, "detector")
+    models.stage = Counting(models.stage)
     # A 45-minute visit, one frame every 2 s from the camera.
     run(
         cfg,
         models,
-        [("no_truck", 60), ("open", 2700), ("covered", 300), ("no_truck", 300)],
+        [("no_truck", 60), ("wire_rod", 2700), ("covered", 300), ("no_truck", 300)],
         step=2.0,
     )
     frames = (60 + 2700 + 300 + 300) // 2
-    assert calls["stage"] < frames / 4  # light tier is duty-cycled too
-    # provisional burst (~13) + checkpoints (~4) + look-back before the tarp (<=18)
-    assert calls["detector"] <= 40, calls
+    assert models.stage.calls < frames / 4  # light tier is duty-cycled too
+    # provisional burst (~10) + checkpoints (~4) + look-back before the tarp (<=18)
+    assert models.detector.calls <= 40, models.detector.calls
+
+
+def test_ingot_truck_is_recorded_but_never_wakes_the_heavy_model():
+    cfg = make_config()
+    models = make_models(cfg)
+    sink, _ = run(
+        cfg, models, [("no_truck", 60), ("other_load", 900), ("covered", 300), ("no_truck", 300)]
+    )
+    assert models.detector.calls == 0
+    assert [r["type"] for r in sink.records] == ["opened", "decision", "decision", "closed"]
+    final = sink.of_type("decision")[-1]["decision"]
+    assert final.product is Product.OTHER
+    assert final.reasons == ["not_wire_rod_load"]
+    assert not final.needs_review
+
+
+def test_heavy_model_waits_for_wire_rods_to_be_confirmed():
+    cfg = make_config(decision={"min_wire_rod_votes": 3})
+    models = make_models(cfg)
+    # 40 s of truck: the visit opens at 30 s but only 1 wire-rod vote is in -> no heavy run.
+    run(cfg, models, [("no_truck", 30), ("wire_rod", 40), ("no_truck", 300)])
+    assert models.detector.calls == 0
+    models = make_models(cfg)
+    run(cfg, models, [("no_truck", 30), ("wire_rod", 90), ("no_truck", 300)])
+    assert models.detector.calls > 0
+
+
+def test_criss_cross_load_with_last_coil_cut_off_by_the_frame():
+    # Bed extends below the image: the near row of the 2x7 criss-cross grid is out of view.
+    bay = {**BASE_CONFIG["bays"][0], "bed_quad": [[0.1, 1.1], [0.9, 1.1], [0.9, 0.05], [0.1, 0.05]]}
+    cfg = make_config(bays=[bay])
+    edge_coil = [(W * 0.3, H - 4)]  # half a coil peeking in at the bottom edge -> slot (0, 0)
+    models = make_models(cfg, n_coils=12, layout="criss_cross", extra=edge_coil)
+    sink, _ = run(
+        cfg, models, [("no_truck", 60), ("wire_rod", 900), ("covered", 300), ("no_truck", 300)]
+    )
+    final = sink.of_type("decision")[-1]["decision"]
+    assert final.layout is Layout.CRISS_CROSS
+    assert final.counts.template == "cc_2x7"
+    assert final.counts.observed == 13
+    assert final.counts.out_of_view_slots == 1
+    assert final.counts.inferred_total == 14
+    assert "load_extends_beyond_camera_view" in final.reasons
+    assert not final.needs_review, final.reasons
 
 
 def test_truck_arriving_covered_needs_review():
@@ -134,7 +186,7 @@ def test_truck_arriving_covered_needs_review():
 def test_restart_mid_visit_resumes_and_flags():
     cfg = make_config()
     models = make_models(cfg)
-    sink, _ = run(cfg, models, [("no_truck", 30), ("open", 300)])
+    sink, _ = run(cfg, models, [("no_truck", 30), ("wire_rod", 300)])
     snapshot = sink.states[("cam01", "left")]
 
     restarted = CameraProcessor(cfg, models, sink, id_factory=lambda: "visit-2")
@@ -142,7 +194,7 @@ def test_restart_mid_visit_resumes_and_flags():
     run(
         cfg,
         models,
-        [("open", 400), ("covered", 300), ("no_truck", 300)],
+        [("wire_rod", 400), ("covered", 300), ("no_truck", 300)],
         processor=restarted,
         sink=sink,
     )

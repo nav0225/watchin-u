@@ -5,8 +5,9 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -29,7 +30,7 @@ def _parse_time(text: str | None, tz: str) -> datetime | None:
 # -- dataset ------------------------------------------------------------------------
 def cmd_capture(a: argparse.Namespace) -> int:
     from watchinu.config import load_config
-    from watchinu.dataset.capture import run_capture
+    from watchinu.dataset.capture import build_capture_cmd, build_timelapse_cmd, run_capture
     from watchinu.io.rtsp import build_rtsp_url
 
     cfg = load_config(a.config)
@@ -37,35 +38,51 @@ def cmd_capture(a: argparse.Namespace) -> int:
     url = build_rtsp_url(
         cfg.camera.host, cfg.camera.rtsp_port, cfg.camera.streams[a.stream], user, password
     )
-    run_capture(url, Path(a.out) / cfg.camera.id / a.stream, cfg.camera.id, a.stream, a.segment_s)
+    out = Path(a.out) / cfg.camera.id / a.stream
+    if a.mode == "timelapse":
+        out = out / "timelapse"
+        cmd = build_timelapse_cmd(url, out, cfg.camera.id, a.stream, a.every_s)
+    else:
+        cmd = build_capture_cmd(url, out, cfg.camera.id, a.stream, a.segment_s)
+    run_capture(cmd, out)
     return 0
 
 
 def cmd_extract(a: argparse.Namespace) -> int:
-    from watchinu.dataset.extract import extract_video
+    from watchinu.dataset.extract import extract_video, index_images, list_images
     from watchinu.dataset.manifest import read_manifest, write_manifest
-    from watchinu.io.video import list_videos
+    from watchinu.io.video import list_videos, parse_start_time
 
     out = Path(a.out)
     manifest_path = out / "manifest.jsonl"
     records = read_manifest(manifest_path)
-    done = {r.video for r in records}
+    done_videos = {r.video for r in records}
+    done_images = {r.source_image for r in records if r.source_image}
     start = _parse_time(a.start_time, a.timezone)
     videos = list_videos(a.input)
     if start is not None and len(videos) > 1:
         log.error("--start-time only makes sense for a single video")
         return 2
     for video in videos:
-        if str(video) in done:
+        if str(video) in done_videos:
             log.info("skip %s (already extracted)", video.name)
             continue
-        records += extract_video(video, out, a.every_s, a.camera_id, a.stream, start)
+        video_start = start
+        if video_start is None and a.start_time_from_mtime and parse_start_time(video) is None:
+            # Short clips without a time in their name: use the file time (kept by zips).
+            video_start = datetime.fromtimestamp(video.stat().st_mtime, ZoneInfo(a.timezone))
+        records += extract_video(video, out, a.every_s, a.camera_id, a.stream, video_start)
         write_manifest(manifest_path, records)  # checkpoint after every video
+    images = [p for p in list_images(a.input) if str(p) not in done_images]
+    images = [p for p in images if out.resolve() not in p.resolve().parents]
+    if images:
+        records += index_images(images, out, a.camera_id, a.stream, a.timezone)
+        write_manifest(manifest_path, records)
     no_time = sum(1 for r in records if r.captured_at is None)
     if no_time:
         log.warning(
-            "%d frames have no capture time: pass --start-time or use "
-            "capture-style file names (..._YYYYMMDDTHHMMSS.mkv)",
+            "%d frames have no capture time: pass --start-time or use capture-style "
+            "file names (..._YYYYMMDDTHHMMSS.mkv / .jpg)",
             no_time,
         )
     log.info("manifest: %s (%d frames)", manifest_path, len(records))
@@ -88,6 +105,26 @@ def cmd_visit_log_template(a: argparse.Namespace) -> int:
 
     write_visit_log_template(a.out)
     log.info("wrote %s", a.out)
+    return 0
+
+
+def cmd_visit_log_from_clips(a: argparse.Namespace) -> int:
+    from watchinu.dataset.manifest import read_manifest
+    from watchinu.dataset.visits import visit_log_from_clips
+
+    n = visit_log_from_clips(read_manifest(a.manifest), a.bay, a.out, a.timezone)
+    log.info("wrote %s with %d clip rows: fill in product, layout and coil_count", a.out, n)
+    return 0
+
+
+def cmd_contact_sheet(a: argparse.Namespace) -> int:
+    from watchinu.dataset.contact_sheet import build_contact_sheets
+    from watchinu.dataset.manifest import read_manifest
+
+    records = read_manifest(a.manifest)
+    sheets = build_contact_sheets(records, Path(a.manifest).parent, a.out, a.per_clip)
+    for sheet in sheets:
+        print(sheet)
     return 0
 
 
@@ -138,7 +175,7 @@ def cmd_export_cls(a: argparse.Namespace) -> int:
 
 
 def cmd_prelabel(a: argparse.Namespace) -> int:
-    from watchinu.dataset.prelabel import prelabel_to_cvat_zip
+    from watchinu.dataset.prelabel import prelabel_to_cvat_zip, write_flat_images_zip
     from watchinu.models.ultralytics_backend import UltralyticsDetector
 
     label_map = dict(p.split("=", 1) for p in a.prompts.split(",")) if a.prompts else {}
@@ -149,9 +186,22 @@ def cmd_prelabel(a: argparse.Namespace) -> int:
         device=a.device,
         prompts=list(label_map) or None,
     )
-    images = sorted(p for p in Path(a.images).rglob("*.jpg"))
+    if a.manifest:
+        from watchinu.dataset.manifest import read_manifest
+
+        root = Path(a.manifest).parent
+        records = read_manifest(a.manifest)
+        images = [root / r.image for r in records if r.duplicate_of is None]
+    elif a.images:
+        images = sorted(p for p in Path(a.images).rglob("*.jpg"))
+    else:
+        log.error("pass --manifest (non-duplicate frames only) or --images")
+        return 2
     n = prelabel_to_cvat_zip(detector, images, a.classes.split(","), a.out, label_map, a.min_conf)
     log.info("%d boxes on %d images -> %s", n, len(images), a.out)
+    if a.images_zip:
+        write_flat_images_zip(images, a.images_zip)
+        log.info("images for the CVAT task -> %s", a.images_zip)
     return 0
 
 
@@ -208,8 +258,10 @@ def _drift_checker(cfg: AppConfig) -> ViewDriftChecker | None:
 
 def cmd_replay(a: argparse.Namespace) -> int:
     from watchinu.config import load_config
+    from watchinu.dataset.extract import list_images
     from watchinu.dataset.visits import load_visit_log
-    from watchinu.io.video import VideoFileSource, list_videos
+    from watchinu.domain import Frame
+    from watchinu.io.video import ImageSequenceSource, VideoFileSource, list_videos
     from watchinu.models.fake import VisitLogStageOracle
     from watchinu.runtime.pipeline import CameraProcessor
     from watchinu.runtime.sinks import JsonlSink
@@ -231,11 +283,20 @@ def cmd_replay(a: argparse.Namespace) -> int:
     sink = JsonlSink(out / "events.jsonl", out / "evidence")
     camera = CameraProcessor(cfg, models, sink, _drift_checker(cfg))
     start = _parse_time(a.start_time, cfg.camera.timezone)
+    sources: list[Iterable[Frame]] = []
     for video in list_videos(a.video):
-        source = VideoFileSource(video, every_s=a.every_s, start_time=start)
-        if source.start_time is None:
+        video_source = VideoFileSource(video, every_s=a.every_s, start_time=start)
+        if video_source.start_time is None:
             log.error("%s: unknown start time; pass --start-time", video.name)
             return 2
+        sources.append(video_source)
+    images = list_images(a.video)
+    if images:
+        sources.append(ImageSequenceSource(images, cfg.camera.timezone))
+    if not sources:
+        log.error("no videos or time-lapse images under %s", a.video)
+        return 2
+    for source in sources:
         for frame in source:
             if oracle is not None:
                 oracle.set_time(frame.ts)
@@ -290,12 +351,29 @@ def cmd_eval(a: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_evaluate_model(a: argparse.Namespace) -> int:
+    from watchinu.eval.model_report import evaluate_classifier, evaluate_detector, to_markdown
+
+    if a.task == "detect":
+        report = evaluate_detector(a.weights, a.data, a.split, a.imgsz, a.device)
+    else:
+        report = evaluate_classifier(a.weights, a.data, a.split, a.imgsz, a.device)
+    md = to_markdown(report)
+    out = Path(a.out) if a.out else Path(a.weights).parent.parent / f"report_{a.split}"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.with_suffix(".json").write_text(json.dumps(report, indent=2))
+    out.with_suffix(".md").write_text(md)
+    print(md)
+    log.info("report saved to %s.{json,md}", out)
+    return 0
+
+
 def cmd_render_config(a: argparse.Namespace) -> int:
     import cv2
     import numpy as np
 
     from watchinu.config import load_config
-    from watchinu.runtime.slots import slot_centres_uv
+    from watchinu.runtime.slots import slot_image_points
     from watchinu.vision.geometry import BedHomography, to_pixels
     from watchinu.vision.overlay import draw_polygon, draw_slots
 
@@ -325,14 +403,43 @@ def cmd_render_config(a: argparse.Namespace) -> int:
                 (255, 255, 0),
                 2,
             )
-        centres = slot_centres_uv(cfg.template_for(bay))
-        pts = BedHomography(quad).to_image(np.array(list(centres.values()), dtype=np.float32))
-        draw_slots(
-            image, {s: (float(x), float(y)) for s, (x, y) in zip(centres, pts, strict=True)}, set()
-        )
+        templates = cfg.templates_for(bay)
+        if a.layout not in templates:
+            log.error("bay %s has no slot template for layout %s", bay.id, a.layout)
+            return 2
+        draw_slots(image, slot_image_points(BedHomography(quad), templates[a.layout][1]), set())
     cv2.imwrite(a.out, image)
     log.info("wrote %s", a.out)
     return 0
+
+
+def cmd_db_check(a: argparse.Namespace) -> int:
+    from watchinu.config import load_config
+    from watchinu.store.health import check_database
+
+    url = load_config(a.config).storage.database_url()
+    checks = check_database(url, REPO_ROOT / "alembic.ini")
+    for c in checks:
+        print(f"[{'OK' if c.ok else 'FAIL'}] {c.name}: {c.detail}")
+    return 0 if all(c.ok for c in checks) else 1
+
+
+def load_env_file(path: Path) -> int:
+    """Minimal ``.env`` reader (KEY=VALUE lines); never overrides the real environment."""
+    n = 0
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip().removeprefix("export ").strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        if key and key not in os.environ:
+            os.environ[key] = value
+            n += 1
+    return n
 
 
 def cmd_db_upgrade(a: argparse.Namespace) -> int:
@@ -347,6 +454,7 @@ def cmd_db_upgrade(a: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="watchinu", description=__doc__)
     p.add_argument("-v", "--verbose", action="store_true")
+    p.add_argument("--env-file", default=".env", help="KEY=VALUE file loaded if present")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     def add(
@@ -364,14 +472,29 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--stream", choices=["main", "sub"], default="main")
     s.add_argument("--out", default="data/raw")
     s.add_argument("--segment-s", type=int, default=300)
+    s.add_argument(
+        "--mode",
+        choices=["video", "timelapse"],
+        default="video",
+        help="video: lossless segments; timelapse: one JPEG every --every-s "
+        "(whole visits at ~1/6-1/12 of the video storage)",
+    )
+    s.add_argument("--every-s", type=float, default=10.0, help="time-lapse interval (s)")
 
     s = add("extract", cmd_extract, "sample frames from footage into a manifest")
-    s.add_argument("--input", required=True, help="video file or folder")
+    s.add_argument(
+        "--input", required=True, help="video file, or folder of videos / time-lapse JPEGs"
+    )
     s.add_argument("--out", default="data/frames")
     s.add_argument("--every-s", type=float, default=5.0)
     s.add_argument("--camera-id", default="cam01")
     s.add_argument("--stream", default="main")
     s.add_argument("--start-time", help="wall-clock start of a single video (ISO-8601)")
+    s.add_argument(
+        "--start-time-from-mtime",
+        action="store_true",
+        help="for clips with no time in their name: use the file modification time",
+    )
     add_tz(s)
 
     s = add("dedupe", cmd_dedupe, "mark near-duplicate frames in a manifest")
@@ -381,6 +504,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = add("visit-log-template", cmd_visit_log_template, "write an empty visit-log CSV")
     s.add_argument("--out", default="visit_log.csv")
+
+    s = add("visit-log-from-clips", cmd_visit_log_from_clips, "one visit-log row per clip")
+    s.add_argument("--manifest", required=True)
+    s.add_argument("--bay", default="left")
+    s.add_argument("--out", default="visit_log.csv")
+    add_tz(s)
+
+    s = add("contact-sheet", cmd_contact_sheet, "thumbnail grids per clip for quick review")
+    s.add_argument("--manifest", required=True)
+    s.add_argument("--out", default="contact_sheets")
+    s.add_argument("--per-clip", type=int, default=4)
 
     s = add("split", cmd_split, "assign visits and leakage-safe train/val/test splits")
     s.add_argument("--manifest", required=True)
@@ -411,8 +545,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = add("prelabel", cmd_prelabel, "pre-label frames for CVAT with a detector")
     s.add_argument("--weights", required=True, help="e.g. yolov8s-worldv2.pt or our v0")
-    s.add_argument("--images", required=True)
+    s.add_argument("--manifest", help="use the manifest's non-duplicate frames (recommended)")
+    s.add_argument("--images", help="or: a folder of .jpg frames")
     s.add_argument("--out", required=True, help="output .zip for CVAT 'YOLO 1.1' import")
+    s.add_argument("--images-zip", help="also write a flat zip of the images for the CVAT task")
     s.add_argument("--classes", default="coil,person")
     s.add_argument("--prompts", help='open-vocab prompts: "wrapped wire coil=coil,person=person"')
     s.add_argument("--imgsz", type=int, default=1280)
@@ -432,7 +568,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = add("replay", cmd_replay, "run the full pipeline on recorded footage")
     s.add_argument("--config", required=True)
-    s.add_argument("--video", required=True, help="file or folder")
+    s.add_argument(
+        "--video", required=True, help="video file, or folder of videos / time-lapse JPEGs"
+    )
     s.add_argument("--out", required=True)
     s.add_argument("--every-s", type=float, default=1.0)
     s.add_argument("--start-time")
@@ -449,17 +587,32 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--out")
     add_tz(s)
 
+    s = add("evaluate-model", cmd_evaluate_model, "score trained weights on a held-out split")
+    s.add_argument("--task", choices=["detect", "classify"], required=True)
+    s.add_argument("--weights", required=True)
+    s.add_argument("--data", required=True, help="data.yaml (detect) or dataset folder (classify)")
+    s.add_argument("--split", default="test")
+    s.add_argument("--imgsz", type=int, default=1280)
+    s.add_argument("--device", default="cpu")
+    s.add_argument("--out", help="report path without suffix (default: next to the run)")
+
     s = add("render-config", cmd_render_config, "draw configured geometry on a frame")
     s.add_argument("--config", required=True)
     s.add_argument("--image", required=True)
     s.add_argument("--out", default="config_check.png")
+    s.add_argument("--layout", default="linear", help="which slot template to draw")
 
     add("db-upgrade", cmd_db_upgrade, "apply database migrations")
+    s = add("db-check", cmd_db_check, "smoke-test the database (connect, schema, round trip)")
+    s.add_argument("--config", required=True)
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    env_file = Path(args.env_file)
+    if env_file.is_file():
+        load_env_file(env_file)
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",

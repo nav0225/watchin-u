@@ -83,3 +83,35 @@ class VideoFileSource:
                 )
         finally:
             cap.release()
+
+
+class ImageSequenceSource:
+    """Replays time-lapse JPEGs (``..._YYYYMMDDTHHMMSS.jpg``) in time order."""
+
+    def __init__(self, paths: list[Path], tz: str = "Asia/Kolkata", stream: str = "main") -> None:
+        timed = [(parse_start_time(p, tz), p) for p in paths]
+        missing = [p.name for t, p in timed if t is None]
+        if missing:
+            raise ValueError(f"no timestamp in image name(s): {', '.join(missing[:5])}")
+        self._items = sorted((t, p) for t, p in timed if t is not None)
+        self.stream = stream
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def __iter__(self) -> Iterator[Frame]:
+        if not self._items:
+            return
+        t0 = self._items[0][0]
+        for i, (t, path) in enumerate(self._items):
+            image = cv2.imread(str(path))
+            if image is None:
+                continue
+            yield Frame(
+                ts=t.timestamp(),
+                image=image,
+                index=i,
+                pts_s=(t - t0).total_seconds(),
+                stream=self.stream,
+                source=str(path),
+            )

@@ -4,7 +4,8 @@ Computer-vision monitoring of wire-rod coil loading at the **lacing point, Mater
 (Parsabhata Road), BALCO**. From the Hikvision camera over the lacing bay it decides, for
 every truck and before the tarpaulin hides the load:
 
-* the **arrangement**: linear (2×5) / criss-cross / mixed;
+* the **product**: wrapped wire rods, or something else (ingots, ...) that is logged and ignored;
+* the **arrangement**: linear (2×5 = 10) / criss-cross (~2×7 = 14) / mixed;
 * the **coil count**, with *observed* and *inferred* counts kept separate;
 * whether a person must **review** it, and why;
 * with an **evidence image** and the model versions used.
@@ -19,9 +20,10 @@ machine opens a visit when a truck stops, and the detector wakes only a few doze
 | Area | State |
 |---|---|
 | Runtime: ingest, state machine, scheduler, slots, decisions, drift guard | built and tested on synthetic footage |
-| Storage: PostgreSQL/SQLite schema, migrations, append-only decisions, outbox | built and tested |
+| Storage: SQL Server / PostgreSQL / SQLite schema, migrations, append-only decisions, outbox, `db-check` | built; tested on SQLite, SQL Server DDL verified offline |
 | Dataset tooling: capture → extract → dedupe → visit log → split → export → pre-label | built and tested |
-| Models | **not trained yet**: waiting for footage and labels (see the runbook) |
+| Models | **not trained yet**: Colab notebooks ready (`notebooks/`), waiting for labels |
+| Deployment | Windows/Linux service, SQL Server / PostgreSQL ([docs/deployment.md](docs/deployment.md)) |
 | Geometry in `configs/camera01.yaml` | **placeholder**: calibrate on a real main-stream frame |
 | ERP / weighbridge integration, live alerts | phase 2 |
 
@@ -46,8 +48,10 @@ watchinu db-upgrade              # creates/migrates the database (WATCHINU_DATAB
 
 | Command | Purpose |
 |---|---|
-| `capture` | Record the camera losslessly into 5-min time-stamped segments (auto-reconnect) |
-| `extract` | Sample frames from footage into `manifest.jsonl` (resumable) |
+| `capture` | Record the camera: lossless 5-min segments, or `--mode timelapse` JPEGs (auto-reconnect) |
+| `extract` | Sample frames from videos / index time-lapse JPEGs into `manifest.jsonl` (resumable) |
+| `visit-log-from-clips` | One pre-filled visit-log row per short clip |
+| `contact-sheet` | Thumbnail grids per clip for quick review |
 | `dedupe` | Mark near-duplicate frames |
 | `visit-log-template` | Empty visit-log CSV (per-truck ground truth) |
 | `split` | Leakage-safe train/val/test split by visit, with a frozen gold test set |
@@ -55,7 +59,9 @@ watchinu db-upgrade              # creates/migrates the database (WATCHINU_DATAB
 | `prelabel` | Model-assisted labelling: CVAT "YOLO 1.1" import zip |
 | `train` | Fine-tune with provenance (`provenance.json` per run) |
 | `replay` | Full pipeline on recorded footage (optionally with ground-truth stages) |
-| `eval` | Visit-level metrics vs the visit log |
+| `eval` | Visit-level metrics vs the visit log (product, layout, count) |
+| `evaluate-model` | Score trained weights on the gold test split (mAP, confusion matrix) |
+| `db-check` | Smoke-test the database: connect, schema version, write/read round trip |
 | `run` | Live on the camera, writing to the database |
 | `render-config` | Draw bays, bed quads, slots and OSD masks on a frame to check calibration |
 | `db-upgrade` | Apply Alembic migrations |

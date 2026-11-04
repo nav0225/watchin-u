@@ -2,6 +2,11 @@
 
 Every step is a `watchinu` command, re-runnable and recorded in the manifest.
 
+**Easiest path (no Python on your laptop):** put the footage zip in Google Drive and run
+`notebooks/01_prepare_dataset_colab.ipynb` (frames, visit log, contact sheets, CVAT
+pre-labels, and later the datasets), then `notebooks/02_train_colab.ipynb` (train, evaluate,
+summary to paste back). The commands below are what those notebooks run.
+
 ```
 footage ─► extract ─► dedupe ─► visit log ─► split ─► CVAT labelling ─► export ─► train ─► replay ─► eval
 ```
@@ -33,9 +38,19 @@ watchinu capture --config configs/camera01.yaml --stream sub --out data/raw
 Expect about 66 GB per day for the main stream and 11 GB per day for the sub-stream at the
 configured bitrates (VBR, usually less). Segments are 5-minute `.mkv` files named with their start time.
 
-**B. NVR exports / the big recording.** Any `.mp4/.mkv/.avi`. If the file name does not
-contain `YYYYMMDDTHHMMSS`, pass the wall-clock start time when extracting, otherwise
-frames cannot be matched to the visit log.
+**B. Time-lapse of whole visits** (best value per GB). One JPEG every 10 s covers a
+40-minute visit in 240 frames, at roughly 1/6 to 1/12 of the video storage:
+
+```bash
+watchinu capture --config configs/camera01.yaml --mode timelapse --every-s 10 --out data/raw
+```
+
+**C. Short clips / NVR exports / phone-free downloads.** Any `.mp4/.mkv/.avi`. If the file name
+does not contain `YYYYMMDDTHHMMSS`, pass `--start-time` (one video) or
+`--start-time-from-mtime` (clips; uses the file time). Ten-second clips are fine for the
+**detector and layout** models: variety across trucks matters more than length. The
+**stage** model and the trigger timing need some whole visits (time-lapse), plus clips of the
+empty bay and of the tarp going on.
 
 ## 2. Extract frames
 
@@ -61,6 +76,9 @@ Duplicates are only *marked* (`duplicate_of`), never deleted. Exports skip them 
 
 ```bash
 watchinu visit-log-template --out data/visit_log.csv   # see configs/visit_log_template.csv
+# short clips: one pre-filled row per clip; you fill product / layout / coil_count
+watchinu visit-log-from-clips --manifest data/frames/manifest.jsonl --out data/visit_log.csv
+watchinu contact-sheet --manifest data/frames/manifest.jsonl --out data/contact_sheets
 ```
 
 Write one row per truck: `arrived`, `loading_start`, `tarp_start`, `tarp_done`, `departed`,
@@ -113,7 +131,7 @@ watchinu export-cls --manifest data/frames/manifest.jsonl --visit-log data/visit
 
 Each output has a `dataset_card.json` (counts per split and class, plus a manifest digest).
 
-## 8. Train (GPU machine)
+## 8. Train (GPU machine; Colab: `notebooks/02_train_colab.ipynb`)
 
 ```bash
 pip install -e ".[ml]"
@@ -125,7 +143,13 @@ watchinu train --data data/ds/layout --model yolo26s-cls.pt --imgsz 384 \
   --hyp configs/train/classifier.yaml --name layout-v1
 ```
 
-Every run writes `provenance.json` (git commit, dataset card, args).
+Every run writes `provenance.json` (git commit, dataset card, args). Score each on the frozen
+test split, and paste the markdown back:
+
+```bash
+watchinu evaluate-model --task detect --weights runs/coil-v1/weights/best.pt --data data/ds/detect/data.yaml
+watchinu evaluate-model --task classify --weights runs/stage-v1/weights/best.pt --data data/ds/stage --imgsz 224
+```
 
 ## 9. Replay and evaluate per visit
 

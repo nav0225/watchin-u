@@ -2,14 +2,18 @@
 
 A row per truck visit with a few timestamps gives, for free:
 * the visit each frame belongs to (leakage-safe splits);
-* a stage label for *every* frame (no_truck / open / covering / covered);
+* a stage label for *every* frame (no_truck / wire_rod / other_load / covering / covered);
 * a layout label for every open-bed frame after loading starts;
-* ground truth for the visit-level evaluation (layout, final coil count).
+* ground truth for the visit-level evaluation (product, layout, final coil count).
 
 CSV columns (timestamps ISO-8601; without an offset they are read in the plant timezone):
     visit_id, camera_id, bay_id, arrived, loading_start, tarp_start, tarp_done, departed,
-    layout, coil_count, truck_ref, notes
+    product, layout, coil_count, truck_ref, notes
 ``loading_start``, ``tarp_start`` and ``tarp_done`` may be blank if not observed.
+``product`` is ``wire_rod`` or what else the truck carries (``ingot``, ``empty``, ...).
+A blank product excludes that visit's open-bed frames from stage training.
+``window`` = ``clip`` marks a short recording: ``arrived``/``departed`` are then just the
+recording bounds (the truck was there before and after), not real arrival/departure.
 """
 
 from __future__ import annotations
@@ -22,7 +26,7 @@ from zoneinfo import ZoneInfo
 from pydantic import BaseModel
 
 from watchinu.dataset.manifest import FrameRecord
-from watchinu.domain import Layout, Stage
+from watchinu.domain import Layout, Product, Stage
 
 VISIT_LOG_COLUMNS = [
     "visit_id",
@@ -33,10 +37,12 @@ VISIT_LOG_COLUMNS = [
     "tarp_start",
     "tarp_done",
     "departed",
+    "product",
     "layout",
     "coil_count",
     "truck_ref",
     "notes",
+    "window",
 ]
 
 NOT_VISIBLE = "not_visible"
@@ -51,29 +57,46 @@ class VisitLabel(BaseModel):
     tarp_start: datetime | None = None
     tarp_done: datetime | None = None
     departed: datetime
+    product: Product | None = None
+    product_label: str | None = None  # as written in the log, e.g. "ingot"
     layout: Layout | None = None
     coil_count: int | None = None
     truck_ref: str | None = None
     notes: str | None = None
+    clip: bool = False  # arrived/departed are recording bounds, not truck transitions
 
     def contains(self, t: datetime) -> bool:
         return self.arrived <= t <= self.departed
 
-    def stage_at(self, t: datetime) -> Stage:
+    def stage_at(self, t: datetime) -> Stage | None:
+        """None when the stage cannot be labelled (open bed of unknown product)."""
         if not self.contains(t):
             return Stage.NO_TRUCK
         if self.tarp_done is not None and t >= self.tarp_done:
             return Stage.COVERED
         if self.tarp_start is not None and t >= self.tarp_start:
             return Stage.COVERING
-        return Stage.OPEN
+        if self.product is Product.WIRE_ROD:
+            # Before the first coil is placed the bed is empty: not (yet) a wire-rod frame.
+            if self.loading_start is not None and t < self.loading_start:
+                return Stage.OTHER_LOAD
+            return Stage.WIRE_ROD
+        if self.product is Product.OTHER:
+            return Stage.OTHER_LOAD
+        return None
 
     def transitions(self) -> list[datetime]:
-        return [
-            t
-            for t in (self.arrived, self.tarp_start, self.tarp_done, self.departed)
-            if t is not None
-        ]
+        """Times where the stage really changes (ambiguous frames nearby are skipped)."""
+        bounds = () if self.clip else (self.arrived, self.departed)
+        events = (self.loading_start, self.tarp_start, self.tarp_done)
+        return [t for t in (*bounds, *events) if t is not None]
+
+
+def parse_product(text: str | None) -> Product | None:
+    norm = (text or "").strip().lower().replace(" ", "_").replace("-", "_")
+    if not norm:
+        return None
+    return Product.WIRE_ROD if norm in ("wire_rod", "wire_rods", "wirerod") else Product.OTHER
 
 
 def _parse_time(text: str, tz: ZoneInfo) -> datetime | None:
@@ -106,12 +129,15 @@ def load_visit_log(path: str | Path, default_tz: str = "Asia/Kolkata") -> list[V
                     tarp_start=_parse_time(row.get("tarp_start") or "", tz),
                     tarp_done=_parse_time(row.get("tarp_done") or "", tz),
                     departed=_parse_time(row["departed"], tz),
+                    product=parse_product(row.get("product")),
+                    product_label=(row.get("product") or "").strip() or None,
                     layout=(row.get("layout") or "").strip() or None,
                     coil_count=int(row["coil_count"])
                     if (row.get("coil_count") or "").strip()
                     else None,
                     truck_ref=(row.get("truck_ref") or "").strip() or None,
                     notes=(row.get("notes") or "").strip() or None,
+                    clip=(row.get("window") or "").strip().lower() == "clip",
                 )
             )
     ids = [v.visit_id for v in out]
@@ -181,10 +207,12 @@ def frame_layout_label(
     if stage is None or stage is Stage.NO_TRUCK:
         return None
     visit = next(v for v in visits if v.camera_id == camera_id and v.contains(t))
-    if stage is not Stage.OPEN:
+    if stage is not Stage.WIRE_ROD:
+        # Tarp on, empty bed or ingots: no wire-rod arrangement to classify.
         return NOT_VISIBLE
-    loading = visit.loading_start or visit.arrived
-    if t < loading + margin:
+    # A clip without loading_start was recorded with the load already on the bed.
+    loading = visit.loading_start or (None if visit.clip else visit.arrived)
+    if loading is not None and t < loading + margin:
         return NOT_VISIBLE if t < loading - margin else None
     if visit.layout is None or visit.layout is Layout.UNKNOWN:
         return None
@@ -194,3 +222,45 @@ def frame_layout_label(
 def write_visit_log_template(path: str | Path) -> None:
     with open(path, "w", newline="", encoding="utf-8") as fh:
         csv.writer(fh).writerow(VISIT_LOG_COLUMNS)
+
+
+def visit_log_from_clips(
+    records: list[FrameRecord], bay_id: str, path: str | Path, tz: str = "Asia/Kolkata"
+) -> int:
+    """Pre-fill one visit-log row per clip (short recordings, one truck each).
+
+    Time columns come from the frames, so the log always matches the manifest; product,
+    layout and coil_count are left for a person to fill in. Returns the number of rows.
+    """
+    zone = ZoneInfo(tz)
+    spans: dict[str, tuple[datetime, datetime, str]] = {}
+    for rec in records:
+        if rec.captured_at is None:
+            continue
+        lo, hi, cam = spans.get(rec.video, (rec.captured_at, rec.captured_at, rec.camera_id))
+        spans[rec.video] = (min(lo, rec.captured_at), max(hi, rec.captured_at), cam)
+    pad = timedelta(seconds=1)
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(VISIT_LOG_COLUMNS)
+        for video, (lo, hi, cam) in sorted(spans.items(), key=lambda kv: kv[1][0]):
+            name = Path(video.removeprefix("timelapse:")).stem
+            w.writerow(
+                [
+                    name,
+                    cam,
+                    bay_id,
+                    (lo - pad).astimezone(zone).isoformat(timespec="seconds"),
+                    "",
+                    "",
+                    "",
+                    (hi + pad).astimezone(zone).isoformat(timespec="seconds"),
+                    "",  # product: wire_rod / ingot / empty / ...
+                    "",  # layout: linear / criss_cross / mixed
+                    "",  # coil_count (from the loading slip)
+                    "",
+                    f"clip {Path(video).name}",
+                    "clip",
+                ]
+            )
+    return len(spans)

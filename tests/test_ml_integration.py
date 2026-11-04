@@ -19,6 +19,8 @@ pytest.importorskip("ultralytics")
 from watchinu.dataset.export import build_classification_dataset, build_detection_dataset
 from watchinu.dataset.manifest import FrameRecord
 from watchinu.dataset.visits import VisitLabel
+from watchinu.domain import Product
+from watchinu.eval.model_report import evaluate_classifier, evaluate_detector, to_markdown
 from watchinu.models.ultralytics_backend import UltralyticsClassifier, UltralyticsDetector
 from watchinu.training import train
 
@@ -92,6 +94,13 @@ def test_detector_finetune_and_backend(tmp_path, monkeypatch):
     assert all(0 <= d.box.x1 <= d.box.x2 <= 640 for d in out)
     assert len(det.version) == 12  # sha256 prefix of the weights file
 
+    report = evaluate_detector(
+        run_dir / "weights" / "best.pt", tmp_path / "ds" / "data.yaml", split="val", imgsz=320
+    )
+    assert set(report["per_class"]) <= {"coil", "person"}
+    assert report["run"]["base_model"] == "yolo26n.pt"
+    assert "| **all** |" in to_markdown(report)
+
 
 def test_classifier_dataset_trains_and_backend_parses(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
@@ -103,6 +112,7 @@ def test_classifier_dataset_trains_and_backend_parses(tmp_path, monkeypatch):
             bay_id="left",
             arrived=T0 + timedelta(minutes=4),
             departed=T0 + timedelta(minutes=12),
+            product=Product.WIRE_ROD,
         )
     ]
     records = [_frame(i, root, with_coils=4 <= i <= 12)[0] for i in range(16)]
@@ -122,5 +132,11 @@ def test_classifier_dataset_trains_and_backend_parses(tmp_path, monkeypatch):
     )
     clf = UltralyticsClassifier(str(run_dir / "weights" / "best.pt"), imgsz=64)
     probs = clf.classify(cv2.imread(str(root / "images" / "f5.jpg")))
-    assert set(probs) == {"no_truck", "open"}
+    assert set(probs) == {"no_truck", "wire_rod"}
     assert abs(sum(probs.values()) - 1.0) < 1e-3
+
+    report = evaluate_classifier(
+        run_dir / "weights" / "best.pt", tmp_path / "cls", split="train", imgsz=64
+    )
+    assert report["n"] > 0 and report["accuracy"] is not None
+    assert "confusion (rows = truth" in to_markdown(report)

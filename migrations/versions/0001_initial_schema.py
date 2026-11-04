@@ -23,7 +23,7 @@ def upgrade() -> None:
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("camera_id", sa.String(length=64), nullable=False),
         sa.Column("kind", sa.String(length=64), nullable=False),
-        sa.Column("message", sa.Text(), nullable=False),
+        sa.Column("message", sa.Unicode(), nullable=False),
         sa.Column("raised_at", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("id"),
     )
@@ -46,7 +46,7 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("sent_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("attempts", sa.Integer(), nullable=False),
-        sa.Column("last_error", sa.Text(), nullable=True),
+        sa.Column("last_error", sa.Unicode(), nullable=True),
         sa.PrimaryKeyConstraint("id"),
     )
     with op.batch_alter_table("outbox", schema=None) as batch_op:
@@ -86,7 +86,7 @@ def upgrade() -> None:
         sa.Column("empty_slots", sa.Integer(), nullable=False),
         sa.Column("unseen_slots", sa.Integer(), nullable=False),
         sa.Column("inferred_total", sa.Integer(), nullable=True),
-        sa.Column("inference_basis", sa.Text(), nullable=False),
+        sa.Column("inference_basis", sa.Unicode(), nullable=False),
         sa.Column("needs_review", sa.Boolean(), nullable=False),
         sa.Column("reasons", sa.JSON(), nullable=False),
         sa.Column("model_versions", sa.JSON(), nullable=False),
@@ -111,7 +111,7 @@ def upgrade() -> None:
         sa.Column("visit_id", sa.String(length=32), nullable=False),
         sa.Column("decision_id", sa.Integer(), nullable=True),
         sa.Column("kind", sa.String(length=32), nullable=False),
-        sa.Column("uri", sa.Text(), nullable=False),
+        sa.Column("uri", sa.Unicode(), nullable=False),
         sa.Column("sha256", sa.String(length=64), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(
@@ -136,7 +136,7 @@ def upgrade() -> None:
         sa.Column("verdict", sa.String(length=32), nullable=False),
         sa.Column("corrected_layout", sa.String(length=32), nullable=True),
         sa.Column("corrected_count", sa.Integer(), nullable=True),
-        sa.Column("note", sa.Text(), nullable=True),
+        sa.Column("note", sa.Unicode(), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(
             ["decision_id"],

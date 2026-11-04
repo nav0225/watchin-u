@@ -65,3 +65,21 @@ def prelabel_to_cvat_zip(
         )
         zf.writestr("train.txt", "\n".join(names_in_zip) + "\n")
     return n_boxes
+
+
+def write_flat_images_zip(image_paths: Iterable[Path], out_zip: str | Path) -> int:
+    """Images flattened to their file names, matching ``obj_train_data/<stem>.txt``.
+
+    Upload this zip when creating the CVAT task, then import the pre-label zip into it.
+    JPEGs are stored without recompression.
+    """
+    out_zip = Path(out_zip)
+    out_zip.parent.mkdir(parents=True, exist_ok=True)
+    seen: set[str] = set()
+    with zipfile.ZipFile(out_zip, "w", zipfile.ZIP_STORED) as zf:
+        for path in image_paths:
+            if path.name in seen:
+                raise ValueError(f"duplicate image name {path.name}: names must be unique")
+            seen.add(path.name)
+            zf.write(path, arcname=path.name)
+    return len(seen)

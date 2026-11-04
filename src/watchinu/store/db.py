@@ -23,7 +23,7 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     String,
-    Text,
+    Unicode,
     UniqueConstraint,
     create_engine,
 )
@@ -65,6 +65,7 @@ class DecisionRow(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     visit_id: Mapped[str] = mapped_column(ForeignKey("visits.id"), index=True)
     kind: Mapped[str] = mapped_column(String(16))  # provisional | final
+    product: Mapped[str] = mapped_column(String(16), default="unknown")  # wire_rod | other
     decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     layout: Mapped[str] = mapped_column(String(32))
     layout_confidence: Mapped[float] = mapped_column(Float)
@@ -73,8 +74,10 @@ class DecisionRow(Base):
     observed_count: Mapped[int] = mapped_column(Integer)
     empty_slots: Mapped[int] = mapped_column(Integer)
     unseen_slots: Mapped[int] = mapped_column(Integer)
+    out_of_view_slots: Mapped[int] = mapped_column(Integer, default=0)
+    count_template: Mapped[str | None] = mapped_column(String(32))
     inferred_total: Mapped[int | None] = mapped_column(Integer)
-    inference_basis: Mapped[str] = mapped_column(Text)
+    inference_basis: Mapped[str] = mapped_column(Unicode)
     needs_review: Mapped[bool] = mapped_column(Boolean)
     reasons: Mapped[list[str]] = mapped_column(JSON)
     model_versions: Mapped[dict[str, Any]] = mapped_column(JSON)
@@ -89,7 +92,7 @@ class Evidence(Base):
     visit_id: Mapped[str] = mapped_column(ForeignKey("visits.id"), index=True)
     decision_id: Mapped[int | None] = mapped_column(ForeignKey("decisions.id"))
     kind: Mapped[str] = mapped_column(String(32))
-    uri: Mapped[str] = mapped_column(Text)
+    uri: Mapped[str] = mapped_column(Unicode)
     sha256: Mapped[str] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -104,7 +107,7 @@ class Review(Base):
     verdict: Mapped[str] = mapped_column(String(32))  # confirmed | corrected | unclear
     corrected_layout: Mapped[str | None] = mapped_column(String(32))
     corrected_count: Mapped[int | None] = mapped_column(Integer)
-    note: Mapped[str | None] = mapped_column(Text)
+    note: Mapped[str | None] = mapped_column(Unicode)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -114,7 +117,7 @@ class Alert(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     camera_id: Mapped[str] = mapped_column(String(64), index=True)
     kind: Mapped[str] = mapped_column(String(64))
-    message: Mapped[str] = mapped_column(Text)
+    message: Mapped[str] = mapped_column(Unicode)
     raised_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
@@ -127,7 +130,7 @@ class OutboxRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
-    last_error: Mapped[str | None] = mapped_column(Text)
+    last_error: Mapped[str | None] = mapped_column(Unicode)
 
 
 class MachineState(Base):

@@ -2,8 +2,10 @@
 
 ## What the system decides
 
-For every truck laced at the lacing point (Material Gate, Parsabhata Road), before it is
-covered, the system records:
+For every truck at the lacing point (Material Gate, Parsabhata Road) the system records
+the **product**: `wire_rod`, or `other` for ingots and other products. Other trucks are logged
+for the audit trail, and the heavy model never wakes for them. For wire-rod trucks, before
+the tarpaulin goes on, it records:
 
 * **layout**: `linear` | `criss_cross` | `mixed` | `unknown`, with confidence and vote agreement;
 * **counts**: *observed* coils, *empty* and *unseen* slots, and an *inferred total* with
@@ -61,6 +63,8 @@ stateDiagram-v2
 
 Over a 45-minute visit the heavy tier runs about 30 times, not 54,000:
 
+0. **Product gate**: nothing heavy runs until the light tier has seen wrapped wire rods
+   in at least 3 frames (about 30 s). Ingot and other trucks never wake it.
 1. **Provisional window** (first 2 min): every 10 s. The provisional decision is emitted at about 2 min.
 2. **After each loading burst**: the change score spikes, then settles. One run per burst.
 3. **Checkpoint**: every 10 min.
@@ -72,12 +76,17 @@ Over a 45-minute visit the heavy tier runs about 30 times, not 54,000:
 ## Slot verification (linear loads)
 
 The bed quad (traced along the tops of the side walls) defines a homography to a unit square.
-Coil box centres are projected and binned into the template grid (2 columns × 5 rows).
-Each slot keeps its last three observations:
+Coil box centres are projected and binned into a per-layout template grid:
+`linear` 2 columns × 5 rows (10) and `criss_cross` 2 × 7 (about 14; to be verified on footage).
+`mixed` has no template and falls back to a robust per-frame count. Each slot keeps its last
+three observations:
 
-* a slot is **visible** only if its centre is not under a worker or under a coil that
-  belongs to a nearer slot;
-* majority vote gives **occupied** or **empty**; a slot never visible stays **unseen**.
+* a slot is **visible** only if its centre is inside the camera view and bay polygon, and not
+  under a worker or under a coil that belongs to a nearer slot;
+* majority vote gives **occupied** or **empty**. A slot never visible is **unseen** (hidden), or
+  **out of view** when its centre lies outside the image. Example: the criss-cross load whose
+  last coil is cut off by the frame edge is reported as `13 observed + 1 outside camera view`
+  (reason `load_extends_beyond_camera_view`, informational, not a review trigger).
 
 ## Storage rules
 
