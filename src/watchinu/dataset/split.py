@@ -18,7 +18,12 @@ from watchinu.dataset.visits import VisitLabel, visit_groups
 SPLITS = ("train", "val", "test")
 
 
-def _group_key(rec: FrameRecord, groups: dict[str, str]) -> str:
+GROUP_BY = ("visit", "clip")
+
+
+def _group_key(rec: FrameRecord, groups: dict[str, str], group_by: str = "visit") -> str:
+    if group_by == "clip":
+        return f"video:{rec.video}"
     if rec.visit_id is not None:
         return f"visit:{groups.get(rec.visit_id, rec.visit_id)}"
     if rec.day is not None:
@@ -33,10 +38,19 @@ def assign_splits(
     test_frac: float = 0.2,
     seed: int = 42,
     frozen_test: set[str] | None = None,
+    group_by: str = "visit",
 ) -> dict[str, str]:
-    """Assign ``split`` on every record. Returns group key -> split."""
+    """Assign ``split`` on every record. Returns group key -> split.
+
+    ``group_by="visit"`` (default) is leakage-safe. ``"clip"`` keeps each recording whole
+    but lets one truck appear in several splits: a *bootstrap* mode for a first model when
+    a session is one continuous group; its val/test scores are optimistic - never report
+    them.
+    """
     if not 0 <= val_frac < 1 or not 0 <= test_frac < 1 or val_frac + test_frac >= 1:
         raise ValueError("invalid split fractions")
+    if group_by not in GROUP_BY:
+        raise ValueError(f"group_by must be one of {GROUP_BY}")
     groups = visit_groups(visits)
     layout_of = {v.visit_id: (v.layout.value if v.layout else "unknown") for v in visits}
     frozen = frozen_test or set()
@@ -44,7 +58,7 @@ def assign_splits(
     stratum_of: dict[str, str] = {}
     forced_test: set[str] = set()
     for rec in records:
-        key = _group_key(rec, groups)
+        key = _group_key(rec, groups, group_by)
         if rec.visit_id is None:
             stratum_of.setdefault(key, "negative")
         else:
@@ -65,13 +79,14 @@ def assign_splits(
         n = len(keys)
         n_test = round(n * test_frac)
         n_val = round(n * val_frac)
-        if n >= 3:  # every stratum with enough groups is represented in val and test
-            n_test, n_val = max(1, n_test), max(1, n_val)
+        if n >= 3:  # every stratum with enough groups is represented in val and test ...
+            n_test = max(1, n_test) if test_frac > 0 else 0  # ... unless that split is off
+            n_val = max(1, n_val) if val_frac > 0 else 0
         for i, key in enumerate(keys):
             assignment[key] = "test" if i < n_test else "val" if i < n_test + n_val else "train"
 
     for rec in records:
-        rec.split = assignment[_group_key(rec, groups)]
+        rec.split = assignment[_group_key(rec, groups, group_by)]
     return assignment
 
 

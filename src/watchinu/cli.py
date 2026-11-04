@@ -90,11 +90,15 @@ def cmd_extract(a: argparse.Namespace) -> int:
 
 
 def cmd_dedupe(a: argparse.Namespace) -> int:
+    from watchinu.config import load_config
     from watchinu.dataset.dedupe import mark_duplicates
     from watchinu.dataset.manifest import read_manifest, write_manifest
 
     records = read_manifest(a.manifest)
-    n = mark_duplicates(records, a.max_distance, a.window)
+    masks = load_config(a.config).camera.osd_masks if a.config else []
+    n = mark_duplicates(
+        records, Path(a.manifest).parent, a.min_change, a.min_gap_s, a.max_gap_s, masks
+    )
     write_manifest(a.manifest, records)
     log.info("%d of %d frames marked as near-duplicates", n, len(records))
     return 0
@@ -137,7 +141,12 @@ def cmd_split(a: argparse.Namespace) -> int:
     visits = load_visit_log(a.visit_log, a.timezone)
     n = assign_visits(records, visits)
     frozen = set(Path(a.frozen_test).read_text().split()) if a.frozen_test else None
-    assign_splits(records, visits, a.val, a.test, a.seed, frozen)
+    if a.group_by == "clip":
+        log.warning(
+            "--group-by clip: one truck can appear in several splits; val/test scores are "
+            "optimistic (bootstrap only, never report them)"
+        )
+    assign_splits(records, visits, a.val, a.test, a.seed, frozen, a.group_by)
     write_manifest(a.manifest, records)
     log.info("%d frames inside visits", n)
     print(json.dumps(split_summary(records), indent=2))
@@ -150,9 +159,17 @@ def cmd_export_detect(a: argparse.Namespace) -> int:
     from watchinu.dataset.manifest import read_manifest
 
     records = read_manifest(a.manifest)
-    poly = load_config(a.config).bay(a.bay).polygon if a.bay else None
+    cfg = load_config(a.config) if a.config else None
+    poly = cfg.bay(a.bay).polygon if cfg and a.bay else None
+    masks = cfg.camera.osd_masks if cfg else []
     card = build_detection_dataset(
-        records, Path(a.manifest).parent, a.labels, a.out, a.classes.split(","), poly
+        records,
+        Path(a.manifest).parent,
+        a.labels,
+        a.out,
+        a.classes.split(","),
+        poly,
+        osd_masks=masks,
     )
     print(json.dumps(card, indent=2))
     return 0
@@ -160,15 +177,28 @@ def cmd_export_detect(a: argparse.Namespace) -> int:
 
 def cmd_export_cls(a: argparse.Namespace) -> int:
     from watchinu.config import load_config
-    from watchinu.dataset.export import build_classification_dataset
+    from watchinu.dataset.export import BayCrop, build_classification_dataset
     from watchinu.dataset.manifest import read_manifest
     from watchinu.dataset.visits import load_visit_log
 
     records = read_manifest(a.manifest)
     visits = load_visit_log(a.visit_log, a.timezone)
-    poly = load_config(a.config).bay(a.bay).polygon if a.bay else None
+    bays: list[BayCrop] = [(None, None)]
+    masks = []
+    if a.config:
+        cfg = load_config(a.config)
+        chosen = cfg.bays if a.bay in (None, "all") else [cfg.bay(a.bay)]
+        bays = [(b.id, b.polygon) for b in chosen]
+        masks = cfg.camera.osd_masks
     card = build_classification_dataset(
-        records, visits, Path(a.manifest).parent, a.out, a.task, poly, a.margin_s
+        records,
+        visits,
+        Path(a.manifest).parent,
+        a.out,
+        a.task,
+        bays,
+        a.margin_s,
+        osd_masks=masks,
     )
     print(json.dumps(card, indent=2))
     return 0
@@ -176,16 +206,35 @@ def cmd_export_cls(a: argparse.Namespace) -> int:
 
 def cmd_prelabel(a: argparse.Namespace) -> int:
     from watchinu.dataset.prelabel import prelabel_to_cvat_zip, write_flat_images_zip
+    from watchinu.models.base import Detector
     from watchinu.models.ultralytics_backend import UltralyticsDetector
 
-    label_map = dict(p.split("=", 1) for p in a.prompts.split(",")) if a.prompts else {}
-    detector = UltralyticsDetector(
-        a.weights,
-        imgsz=a.imgsz,
-        conf=a.min_conf,
-        device=a.device,
-        prompts=list(label_map) or None,
-    )
+    label_map: dict[str, str] = {}
+    detector: Detector
+    if a.method == "wrap-colour":
+        from watchinu.models.prelabelers import (
+            CompositeDetector,
+            LabelFilter,
+            WrapColourCoilProposer,
+        )
+
+        persons = UltralyticsDetector(a.person_weights, imgsz=a.imgsz, conf=0.3, device=a.device)
+        detector = CompositeDetector(
+            WrapColourCoilProposer(imgsz=a.imgsz, device=a.device),
+            LabelFilter(persons, {"person": "person"}),
+        )
+    else:
+        if not a.weights:
+            log.error("--weights is required for --method weights")
+            return 2
+        label_map = dict(p.split("=", 1) for p in a.prompts.split(",")) if a.prompts else {}
+        detector = UltralyticsDetector(
+            a.weights,
+            imgsz=a.imgsz,
+            conf=a.min_conf,
+            device=a.device,
+            prompts=list(label_map) or None,
+        )
     if a.manifest:
         from watchinu.dataset.manifest import read_manifest
 
@@ -267,13 +316,15 @@ def cmd_replay(a: argparse.Namespace) -> int:
     from watchinu.runtime.sinks import JsonlSink
 
     cfg = load_config(a.config)
-    oracle = None
+    oracles: list[VisitLogStageOracle] = []
+    models = _models(cfg)
     if a.stage_oracle:
-        oracle = VisitLogStageOracle(
-            load_visit_log(a.stage_oracle, cfg.camera.timezone), cfg.camera.id
-        )
-    models = _models(cfg, oracle)
-    if models.stage is None:
+        visits = load_visit_log(a.stage_oracle, cfg.camera.timezone)
+        for bay in cfg.bays:  # ground-truth stages, answered per lane
+            oracle = VisitLogStageOracle(visits, cfg.camera.id, bay.id)
+            models.stage_by_bay[bay.id] = oracle
+            oracles.append(oracle)
+    if models.stage is None and not models.stage_by_bay:
         log.error(
             "no stage classifier configured (models.stage_classifier) and no "
             "--stage-oracle: visits can never open"
@@ -298,7 +349,7 @@ def cmd_replay(a: argparse.Namespace) -> int:
         return 2
     for source in sources:
         for frame in source:
-            if oracle is not None:
+            for oracle in oracles:
                 oracle.set_time(frame.ts)
             camera.process(frame)
     log.info("events written to %s", out / "events.jsonl")
@@ -499,8 +550,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = add("dedupe", cmd_dedupe, "mark near-duplicate frames in a manifest")
     s.add_argument("--manifest", required=True)
-    s.add_argument("--max-distance", type=int, default=6)
-    s.add_argument("--window", type=int, default=30)
+    s.add_argument("--config", help="camera config: blank its OSD overlays before comparing")
+    s.add_argument("--min-change", type=float, default=0.03, help="per-region change to keep")
+    s.add_argument("--min-gap-s", type=float, default=3.0)
+    s.add_argument("--max-gap-s", type=float, default=10.0, help="keep at least this often")
 
     s = add("visit-log-template", cmd_visit_log_template, "write an empty visit-log CSV")
     s.add_argument("--out", default="visit_log.csv")
@@ -523,6 +576,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--test", type=float, default=0.2)
     s.add_argument("--seed", type=int, default=42)
     s.add_argument("--frozen-test", help="file with visit ids that must stay in test")
+    s.add_argument(
+        "--group-by",
+        choices=["visit", "clip"],
+        default="visit",
+        help="visit: leakage-safe (default); clip: bootstrap when a session is one group",
+    )
     add_tz(s)
 
     s = add("export-detect", cmd_export_detect, "build a YOLO detection dataset")
@@ -530,21 +589,29 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--labels", required=True, help="folder of YOLO .txt labels (CVAT export)")
     s.add_argument("--out", required=True)
     s.add_argument("--classes", default="coil,person")
-    s.add_argument("--config")
-    s.add_argument("--bay", help="crop to this bay (needs --config)")
+    s.add_argument("--config", help="camera config: blank its OSD overlays (recommended)")
+    s.add_argument("--bay", help="experimental: crop to one bay (runtime uses full frames)")
 
     s = add("export-cls", cmd_export_cls, "build a stage/layout classification dataset")
     s.add_argument("--manifest", required=True)
     s.add_argument("--visit-log", required=True)
     s.add_argument("--task", choices=["stage", "layout"], required=True)
     s.add_argument("--out", required=True)
-    s.add_argument("--config")
-    s.add_argument("--bay")
+    s.add_argument("--config", help="crop per bay with lane-specific labels (recommended)")
+    s.add_argument("--bay", default="all", help="one bay id, or 'all' (default)")
     s.add_argument("--margin-s", type=float, default=60.0)
     add_tz(s)
 
     s = add("prelabel", cmd_prelabel, "pre-label frames for CVAT with a detector")
-    s.add_argument("--weights", required=True, help="e.g. yolov8s-worldv2.pt or our v0")
+    s.add_argument(
+        "--method",
+        choices=["wrap-colour", "weights"],
+        default="weights",
+        help="wrap-colour: zero-label bootstrap (YOLOE proposals + BALCO wrap colour test); "
+        "weights: a trained detector (our v0+) or an open-vocabulary model with --prompts",
+    )
+    s.add_argument("--weights", help="detector weights for --method weights")
+    s.add_argument("--person-weights", default="yolo26s.pt", help="COCO model for workers")
     s.add_argument("--manifest", help="use the manifest's non-duplicate frames (recommended)")
     s.add_argument("--images", help="or: a folder of .jpg frames")
     s.add_argument("--out", required=True, help="output .zip for CVAT 'YOLO 1.1' import")

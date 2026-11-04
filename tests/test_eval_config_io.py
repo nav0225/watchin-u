@@ -25,9 +25,12 @@ REPO = Path(__file__).resolve().parents[1]
 def test_shipped_camera_config_is_valid():
     cfg = load_config(REPO / "configs" / "camera01.yaml")
     assert cfg.camera.streams["main"].endswith("/101")
-    templates = cfg.templates_for(cfg.bay("left"))
-    assert templates["linear"][1].n_slots == 10
-    assert templates["criss_cross"][1].n_slots == 14
+    assert [b.id for b in cfg.bays] == ["far", "near"]  # two lanes in view
+    for bay in cfg.bays:
+        templates = cfg.templates_for(bay)
+        assert templates["linear"][1].n_slots == 10
+        assert templates["criss_cross"][1].n_slots == 14
+    assert len(cfg.camera.osd_masks) == 2
 
 
 def test_config_rejects_unknown_template_and_bad_coordinates():

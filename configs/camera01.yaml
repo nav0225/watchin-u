@@ -3,11 +3,11 @@
 # All coordinates are NORMALISED (0..1 of width/height) so the same file works for the
 # main stream (2560x1440) and the sub-stream (640x360).
 #
-# !!! The geometry below is a FIRST ESTIMATE from a phone photo of the live view
-# !!! (08-10-2026 15:05): bed_quad was fitted to the 8 visible coil centres (2 columns x
-# !!! 4 rows, max reprojection error ~12 px at 1280x720). Re-fit it on a real main-stream
-# !!! frame before use and check it visually:
-# !!!   watchinu render-config --config configs/camera01.yaml --image <frame.jpg> --out check.png
+# Geometry calibrated on real main-stream frames of 2026-11-04 (view verified identical
+# across all 9 clips: <0.5 px shift). bed_quad corners are fitted homographies from coil
+# centres: far lane to a full linear 2x5 load (mean residual 7 px @1600x900), near lane
+# to 4 visible rows (rear row is below the frame). Re-check after any camera change:
+#   watchinu render-config --config configs/camera01.yaml --image <frame.jpg> --layout linear
 
 camera:
   id: cam01
@@ -22,9 +22,9 @@ camera:
     password: WATCHINU_CAM01_PASSWORD
   timezone: Asia/Kolkata
   osd_masks:
-    - [[0.0, 0.0], [0.37, 0.0], [0.37, 0.13], [0.0, 0.13]]      # date/time overlay
-    - [[0.74, 0.82], [0.92, 0.82], [0.92, 0.93], [0.74, 0.93]]  # "Camera 01" overlay
-  static_region: [[0.45, 0.0], [1.0, 0.0], [1.0, 0.35], [0.45, 0.35]]  # shed trusses
+    - [[0.0, 0.035], [0.30, 0.035], [0.30, 0.105], [0.0, 0.105]]       # date/time overlay
+    - [[0.715, 0.875], [0.85, 0.875], [0.85, 0.945], [0.715, 0.945]]   # "Camera 01" overlay
+  static_region: [[0.45, 0.0], [1.0, 0.0], [1.0, 0.40], [0.45, 0.17]]  # shed wall + trusses
   reference_image: null   # set to a calibrated main-stream frame for the drift guard
 
 slot_templates:
@@ -32,11 +32,17 @@ slot_templates:
   cc_2x7: {columns: 2, rows: 7}    # criss-cross: ~14 coils, near row cut off by the frame (VERIFY on footage)
 
 bays:
-  - id: left
-    # Left truck only: right edge follows the plank between the two trucks.
-    polygon: [[0.0, 0.264], [0.344, 0.264], [0.344, 0.403], [1.0, 0.819], [1.0, 1.0], [0.0, 1.0]]
-    # near-left, near-right, far-right, far-left (near end is cut off by the frame bottom)
-    bed_quad: [[0.444, 1.16], [0.831, 0.938], [0.124, 0.296], [-0.062, 0.32]]
+  # Far lane: along the shed wall. Coils of this lane sit above the boundary line
+  # (0.17,0.27)-(1.0,0.895); detections are assigned to a lane by their box centre.
+  - id: far
+    polygon: [[0.10, 0.17], [0.25, 0.17], [1.0, 0.48], [1.0, 0.895], [0.17, 0.27], [0.16, 0.20]]
+    # u: 0 = road side, 1 = wall side; v: 0 = rear (near camera), 1 = front (cabin)
+    bed_quad: [[0.838, 0.819], [1.037, 0.715], [0.285, 0.216], [0.16, 0.238]]
+    slot_templates: {linear: std_2x5, criss_cross: cc_2x7}
+  # Near lane: road side, below the boundary; trucks run off the left/bottom image edge.
+  - id: near
+    polygon: [[0.0, 0.20], [0.16, 0.20], [0.17, 0.27], [1.0, 0.895], [1.0, 1.0], [0.0, 1.0]]
+    bed_quad: [[0.956, 2.098], [1.88, 1.936], [0.132, 0.278], [-0.064, 0.31]]
     slot_templates: {linear: std_2x5, criss_cross: cc_2x7}
 
 visit:

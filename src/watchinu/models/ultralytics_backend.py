@@ -22,7 +22,7 @@ def _file_version(path: str) -> str:
     return h.hexdigest()[:12]
 
 
-def _load(weights: str) -> Any:
+def load_yolo(weights: str) -> Any:
     try:
         from ultralytics import YOLO
     except ImportError as exc:  # pragma: no cover - depends on optional extra
@@ -40,7 +40,7 @@ class UltralyticsDetector:
         device: str = "cpu",
         prompts: list[str] | None = None,
     ) -> None:
-        self._model = _load(weights)
+        self._model = load_yolo(weights)
         if prompts:
             # Open-vocabulary models (YOLO-World / YOLOE) for zero-shot pre-labelling.
             self._model.set_classes(prompts)
@@ -83,7 +83,7 @@ class UltralyticsDetector:
 
 class UltralyticsClassifier:
     def __init__(self, weights: str, imgsz: int = 224, device: str = "cpu") -> None:
-        self._model = _load(weights)
+        self._model = load_yolo(weights)
         self._imgsz = imgsz
         self._device = device
         self.name = Path(weights).stem

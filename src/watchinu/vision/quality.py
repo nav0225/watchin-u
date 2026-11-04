@@ -74,3 +74,24 @@ def change_score(prev_thumb: np.ndarray | None, cur_thumb: np.ndarray) -> float:
         return 0.0
     diff = cv2.absdiff(prev_thumb, cur_thumb)
     return float(diff.mean()) / 255.0
+
+
+def region_change(
+    prev_thumb: np.ndarray, cur_thumb: np.ndarray, grid: tuple[int, int] = (6, 4)
+) -> float:
+    """Largest per-cell mean absolute difference in 0..1 over a ``grid`` (cols, rows).
+
+    A whole-frame average dilutes local events (one worker moving, a tarp edge advancing)
+    on a fixed camera; the maximum over cells keeps them visible while sensor noise,
+    which is spread evenly, stays small.
+    """
+    diff = cv2.absdiff(prev_thumb, cur_thumb).astype(np.float32)
+    h, w = diff.shape[:2]
+    cols, rows = grid
+    best = 0.0
+    for r in range(rows):
+        for c in range(cols):
+            cell = diff[r * h // rows : (r + 1) * h // rows, c * w // cols : (c + 1) * w // cols]
+            if cell.size:
+                best = max(best, float(cell.mean()))
+    return best / 255.0

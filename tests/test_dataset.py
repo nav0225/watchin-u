@@ -39,6 +39,12 @@ def test_parse_start_time_from_capture_filename():
     t = parse_start_time("cam01_main_20261031T141500.mkv")
     assert t is not None and t.isoformat() == "2026-10-31T14:15:00+05:30"
     assert parse_start_time("random.mp4") is None
+    # Hikvision web-client exports: IP_channel_YYYYMMDDHHMMSS + unpadded milliseconds
+    hik = parse_start_time("10.110.4.8_01_20261104101552888.mp4")
+    assert hik is not None and hik.isoformat() == "2026-11-04T10:15:52+05:30"
+    short_ms = parse_start_time("10.110.4.8_01_2026110411213653.mp4")
+    assert short_ms is not None and short_ms.isoformat() == "2026-11-04T11:21:36+05:30"
+    assert parse_start_time("10.110.4.8_01_20261399999999.mp4") is None  # not a date
 
 
 def test_video_source_samples_by_time(tmp_path):
@@ -75,11 +81,57 @@ def test_extract_writes_images_and_manifest(tmp_path):
 
 
 def test_dedupe_keeps_one_frame_per_static_scene(tmp_path):
-    _, records = _extract(tmp_path)
-    n = mark_duplicates(records)
+    out, records = _extract(tmp_path)
+    n = mark_duplicates(records, out, min_gap_s=1.0)
     kept = [r for r in records if r.duplicate_of is None]
     assert n == len(records) - len(kept)
-    assert len(kept) == 2  # one per scene
+    assert [r.pts_s for r in kept] == [0.0, 2.0]  # one per scene
+
+
+def _frames_from(tmp_path: Path, images: list[np.ndarray], step_s: float):
+    from watchinu.dataset.manifest import FrameRecord
+
+    root = tmp_path / "frames"
+    (root / "images").mkdir(parents=True)
+    recs = []
+    for i, img in enumerate(images):
+        cv2.imwrite(str(root / "images" / f"f{i}.jpg"), img)
+        recs.append(
+            FrameRecord(
+                frame_id=f"f{i}",
+                image=f"images/f{i}.jpg",
+                video="v.mkv",
+                camera_id="cam01",
+                stream="main",
+                pts_s=i * step_s,
+                frame_index=i,
+                captured_at=None,
+                width=640,
+                height=360,
+                blur_var=100,
+                brightness=100,
+                overexposed_fraction=0,
+                dhash="0" * 16,
+            )
+        )
+    return root, recs
+
+
+def test_dedupe_policy_on_a_fixed_camera(tmp_path):
+    base = cv2.resize(_scene(3), (640, 360), interpolation=cv2.INTER_NEAREST)
+    worker = base.copy()
+    cv2.rectangle(worker, (400, 150), (470, 300), (0, 140, 255), -1)  # a worker appears
+    clock = base.copy()
+    cv2.putText(clock, "12:31:43", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
+    # t = 0..24 s at 1 fps: static, worker appears at 5 s, OSD-only change at 15-16 s
+    frames = [base] * 5 + [worker] * 10 + [clock] * 2 + [base] * 8
+    root, recs = _frames_from(tmp_path, frames, step_s=1.0)
+    osd = [[(0.0, 0.0), (0.4, 0.0), (0.4, 0.15), (0.0, 0.15)]]
+    mark_duplicates(recs, root, min_change=0.03, min_gap_s=3, max_gap_s=10, osd_masks=osd)
+    kept = [r.pts_s for r in recs if r.duplicate_of is None]
+    # 0: first; 5: worker appeared; 15: worker left (scene change); 25 would be max-gap
+    assert kept == [0.0, 5.0, 15.0]
+    assert all(r.duplicate_of for r in recs if r.pts_s not in kept)
 
 
 VISIT_CSV = """visit_id,camera_id,bay_id,arrived,loading_start,tarp_start,tarp_done,departed,product,layout,coil_count,truck_ref,notes
@@ -223,7 +275,7 @@ def test_build_classification_dataset(tmp_path):
     card = build_classification_dataset(records, vs, out, tmp_path / "cls2", "stage")
     assert card["splits"] == {}
     # Duplicates are excluded by default.
-    mark_duplicates(records)
+    mark_duplicates(records, out, min_gap_s=1.0)
     card = build_classification_dataset(
         records, vs, out, tmp_path / "cls3", "stage", boundary_margin_s=0
     )
@@ -272,3 +324,100 @@ def test_clip_rows_do_not_treat_recording_bounds_as_transitions(tmp_path):
     t = datetime.fromisoformat(f"2026-11-04T10:00:05{IST}")
     assert frame_stage(t, "cam01", [clip], m) is Stage.WIRE_ROD
     assert frame_layout_label(t, "cam01", [clip], m) == "linear"
+
+
+def test_labels_and_exports_are_per_lane(tmp_path):
+    path = tmp_path / "lanes.csv"
+    path.write_text(
+        "visit_id,camera_id,bay_id,arrived,loading_start,tarp_start,tarp_done,departed,"
+        "product,layout,coil_count,truck_ref,notes,window\n"
+        "w,cam01,far,2026-11-04T11:00:00,,,,2026-11-04T12:30:00,wire_rod,criss_cross,14,,,\n"
+        "i,cam01,near,2026-11-04T10:59:00,,2026-11-04T12:06:00,,2026-11-04T12:20:00,ingot,,,,,\n"
+    )
+    vs = load_visit_log(path)
+    t = datetime.fromisoformat(f"2026-11-04T11:30:00{IST}")
+    m = timedelta(seconds=60)
+    assert frame_stage(t, "cam01", vs, m, "far") is Stage.WIRE_ROD
+    assert frame_stage(t, "cam01", vs, m, "near") is Stage.OTHER_LOAD
+    assert frame_layout_label(t, "cam01", vs, m, "far") == "criss_cross"
+    assert frame_layout_label(t, "cam01", vs, m, "near") == NOT_VISIBLE
+
+    from watchinu.dataset.manifest import FrameRecord
+
+    root = tmp_path / "frames"
+    (root / "images").mkdir(parents=True)
+    img = np.full((360, 640, 3), 200, np.uint8)
+    cv2.imwrite(str(root / "images" / "f.jpg"), img)
+    rec = FrameRecord(
+        frame_id="f",
+        image="images/f.jpg",
+        video="v",
+        camera_id="cam01",
+        stream="main",
+        pts_s=0,
+        frame_index=0,
+        captured_at=t,
+        width=640,
+        height=360,
+        blur_var=100,
+        brightness=200,
+        overexposed_fraction=0,
+        dhash="0" * 16,
+        split="train",
+    )
+    lanes = [
+        ("far", [(0.5, 0), (1, 0), (1, 1), (0.5, 1)]),
+        ("near", [(0, 0), (0.5, 0), (0.5, 1), (0, 1)]),
+    ]
+    osd = [[(0.0, 0.0), (0.2, 0.0), (0.2, 0.1), (0.0, 0.1)]]
+    card = build_classification_dataset(
+        [rec], vs, root, tmp_path / "stage", "stage", lanes, osd_masks=osd
+    )
+    assert card["splits"]["train"] == {"wire_rod": 1, "other_load": 1}
+    near = cv2.imread(str(tmp_path / "stage/train/other_load/f__near.jpg"))
+    # cropped to its lane (boundingRect includes the shared edge pixel) and OSD blanked
+    assert near.shape[1] in (320, 321) and near[5, 5].max() < 10
+
+
+def test_observed_stage_and_truck_ref_grouping(tmp_path):
+    path = tmp_path / "obs.csv"
+    path.write_text(
+        "visit_id,camera_id,bay_id,arrived,loading_start,tarp_start,tarp_done,departed,"
+        "product,layout,coil_count,truck_ref,notes,window,stage\n"
+        "a,cam01,far,2026-11-04T10:15:51,,,,2026-11-04T10:16:34,wire_rod,linear,10,V1,,clip,wire_rod\n"
+        "b,cam01,far,2026-11-04T10:38:35,,,,2026-11-04T10:39:00,wire_rod,linear,10,V1,,clip,covered\n"
+        "c,cam01,near,2026-11-04T12:31:32,,,,2026-11-04T12:31:53,wire_rod,linear,,V4,,clip,\n"
+    )
+    vs = load_visit_log(path)
+    m = timedelta(seconds=60)
+    at = lambda hhmmss: datetime.fromisoformat(f"2026-11-04T{hhmmss}{IST}")  # noqa: E731
+    assert frame_stage(at("10:16:00"), "cam01", vs, m, "far") is Stage.WIRE_ROD
+    assert frame_stage(at("10:38:45"), "cam01", vs, m, "far") is Stage.COVERED
+    assert frame_layout_label(at("10:38:45"), "cam01", vs, m, "far") == NOT_VISIBLE
+    groups = visit_groups(vs)
+    assert groups["a"] == groups["b"] != groups["c"]  # same truck -> same split
+
+
+def test_clip_grouping_keeps_recordings_whole(tmp_path):
+    vs = visits(tmp_path)
+    recs = _records_for(vs, tmp_path)
+    for i, r in enumerate(recs):
+        r.video = f"clip{i // 2}.mp4"  # 3 recordings, 2 frames each
+    assign_visits(recs, vs)
+    assign_splits(recs, vs, val_frac=0.3, test_frac=0.3, seed=3, group_by="clip")
+    by_clip = {}
+    for r in recs:
+        by_clip.setdefault(r.video, set()).add(r.split)
+    assert all(len(s) == 1 for s in by_clip.values())
+    with pytest.raises(ValueError):
+        assign_splits(recs, vs, group_by="frame")
+
+
+def test_zero_fraction_disables_a_split(tmp_path):
+    vs = visits(tmp_path)
+    recs = _records_for(vs, tmp_path)
+    for i, r in enumerate(recs):
+        r.video = f"clip{i}.mp4"
+    assign_visits(recs, vs)
+    assign_splits(recs, vs, val_frac=0.3, test_frac=0.0, group_by="clip")
+    assert "test" not in {r.split for r in recs}

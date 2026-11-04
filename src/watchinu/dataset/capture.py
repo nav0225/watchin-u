@@ -2,9 +2,10 @@
 
 Video (``build_capture_cmd``) keeps every frame; use it for short clips and NVR-like
 evidence. Time-lapse (``build_timelapse_cmd``) keeps one high-quality JPEG every few
-seconds: a full 40-minute visit at 10 s is 240 frames. At 2560x1440 a frame is roughly
-0.5-1.2 MB, i.e. ~0.2-0.45 GB/h at 10 s versus ~2.8 GB/h of video - and it is exactly what
-the stage/layout models and the trigger logic consume (the runtime samples every 5-10 s).
+seconds: a full 40-minute visit at 10 s is 240 frames. Measured on the 2026-11-04 footage
+(2560x1440, ``-q:v 2``): ~1.0 MB/frame, i.e. ~0.36 GB/h at 10 s versus ~2.5 GB/h of video
+(~7x less) - and it is exactly what the stage/layout models and the trigger logic consume
+(the runtime samples every 5-10 s).
 
 * ``-c copy``: no re-encoding, so recorded data is bit-identical to what the live
   pipeline will decode (train/inference parity) and costs almost no CPU.

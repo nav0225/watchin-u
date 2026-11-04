@@ -14,16 +14,28 @@ from watchinu.domain import Frame
 
 VIDEO_SUFFIXES = {".mp4", ".mkv", ".avi", ".ts", ".mov"}
 
-_STAMP_RE = re.compile(r"(\d{8})T(\d{6})")
+# Recognised file-name time stamps, in local camera time:
+#   ours (capture):        cam01_main_20261031T141500.mkv
+#   Hikvision web client:  10.110.4.8_01_20261104101552888.mp4  (YYYYMMDDHHMMSS + 0-3 ms digits)
+_STAMP_PATTERNS = (
+    re.compile(r"(?<!\d)(\d{8})T(\d{6})(?!\d)"),
+    re.compile(r"_(\d{8})(\d{6})\d{0,3}$"),
+)
 
 
 def parse_start_time(path: str | Path, tz: str = "Asia/Kolkata") -> datetime | None:
-    """Start time from a ``..._YYYYMMDDTHHMMSS...`` filename (as written by ``capture``)."""
-    match = _STAMP_RE.search(Path(path).name)
-    if not match:
-        return None
-    naive = datetime.strptime(match.group(1) + match.group(2), "%Y%m%d%H%M%S")
-    return naive.replace(tzinfo=ZoneInfo(tz))
+    """Wall-clock start time encoded in a recording's file name, or None."""
+    stem = Path(path).stem
+    for pattern in _STAMP_PATTERNS:
+        match = pattern.search(stem)
+        if match is None:
+            continue
+        try:
+            naive = datetime.strptime(match.group(1) + match.group(2), "%Y%m%d%H%M%S")
+        except ValueError:  # digits that are not a valid date/time
+            continue
+        return naive.replace(tzinfo=ZoneInfo(tz))
+    return None
 
 
 def list_videos(path: str | Path) -> list[Path]:

@@ -42,7 +42,10 @@ cover it, add an example to this guide so everyone labels it the same way.
 | `product` | `wire_rod` for wrapped wire-rod coils. Anything else in plain words: `ingot`, `empty`, ... Every non-wire-rod value trains the `other_load` class. Leave it blank only if unknown (that visit's open-bed frames are then skipped). |
 | `layout` | `linear` (2 columns × 5, coils standing in rows), `criss_cross` (~2 × 7), or `mixed` (both in one truck). Blank for non-wire-rod trucks. |
 | `coil_count` | Final number of coils on the truck. Take it from the loading slip, dispatch note or weighbridge, not from the camera. |
+| `bay_id` | Lane: `far` (along the shed wall) or `near` (road side). **One row per lane**: two trucks at once means two rows. |
+| `truck_ref` | Same value for one physical truck seen in several recordings (for example `2026-11-04/V3`). Such rows always share a split. |
 | `window` | `clip` when the row describes a short recording rather than a whole visit (written by `visit-log-from-clips`). Arrival and departure are then just the recording bounds. |
+| `stage` | Optional. What was visible for the whole window when the real tarp times were not observed: `wire_rod`, `other_load`, `covering`, `covered`. It overrides the tarp columns. |
 
 Stage labels per frame follow automatically: `no_truck` outside visits; `other_load` for
 non-wire-rod trucks, and for a wire-rod truck before `loading_start` (empty bed); `wire_rod`

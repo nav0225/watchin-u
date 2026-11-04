@@ -107,7 +107,8 @@ class BayConfig(_Strict):
     @field_validator("bed_quad")
     @classmethod
     def _quad_norm(cls, v: list[Point]) -> list[Point]:
-        return _check_normalised(v, -0.5, 1.5)
+        # Strong perspective puts extrapolated bed corners far outside the frame.
+        return _check_normalised(v, -1.0, 3.0)
 
 
 class VisitConfig(_Strict):

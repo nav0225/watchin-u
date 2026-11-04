@@ -225,3 +225,62 @@ def test_view_drift_suspends_processing_and_alerts():
     run(cfg, None, NORMAL, processor=camera, sink=sink)
     assert [r["kind"] for r in sink.of_type("alert")] == ["view_drift"]
     assert not sink.of_type("opened")
+
+
+def _two_lane_config():
+    left = {
+        "id": "left",
+        "polygon": [[0, 0], [0.5, 0], [0.5, 1], [0, 1]],
+        "bed_quad": [[0.05, 0.95], [0.45, 0.95], [0.45, 0.05], [0.05, 0.05]],
+        "slot_templates": {"linear": "std_2x5"},
+    }
+    right = {
+        "id": "right",
+        "polygon": [[0.5, 0], [1, 0], [1, 1], [0.5, 1]],
+        "bed_quad": [[0.55, 0.95], [0.95, 0.95], [0.95, 0.05], [0.55, 0.05]],
+        "slot_templates": {"linear": "std_2x5"},
+    }
+    return make_config(bays=[left, right])
+
+
+def test_two_lanes_share_one_detector_pass_and_count_only_their_own_coils():
+    cfg = _two_lane_config()
+    # Left lane: wire rods with 10 coils; right lane: ingot truck (other_load).
+    left_img = textured(CODES["wire_rod"], (H, W // 2))
+    right_img = textured(CODES["other_load"], (H, W // 2))
+    frame_img = np.hstack([left_img, right_img])
+    bay = cfg.bays[0]
+    pts = slot_image_points(
+        BedHomography(to_pixels(bay.bed_quad, W, H)), cfg.templates_for(bay)["linear"][1]
+    )
+    # Coils in BOTH halves; the right-half ones must never reach the left lane's count.
+    boxes = [BBox(x - 5, y - 5, x + 5, y + 5) for x, y in pts.values()]
+    boxes += [b.shifted(W / 2, 0) for b in boxes]
+    detector = Counting(FunctionDetector(lambda img: [Detection("coil", 0.9, b) for b in boxes]))
+    models = ModelSet(
+        stage=FunctionClassifier(stage_from_image),
+        layout=FunctionClassifier(lambda img: {"linear": 0.9, "mixed": 0.1}),
+        detector=detector,
+    )
+    sink = MemorySink()
+    ids = iter(f"v{i}" for i in range(10))
+    camera = CameraProcessor(cfg, models, sink, id_factory=lambda: next(ids))
+    t = 1_700_000_000.0
+    for img, seconds in (
+        (textured(CODES["no_truck"], (H, W)), 60),
+        (frame_img, 900),
+        (textured(CODES["covered"], (H, W)), 300),
+        (textured(CODES["no_truck"], (H, W)), 300),
+    ):
+        for _ in range(int(seconds / 5)):
+            camera.process(Frame(ts=t, image=img))
+            t += 5
+    finals = {
+        r["bay"]: r["decision"] for r in sink.of_type("decision") if r["decision"].kind == "final"
+    }
+    assert finals["left"].product is Product.WIRE_ROD
+    assert finals["left"].counts.observed == 10  # not 20
+    assert finals["right"].product is Product.OTHER  # ingot lane: logged, not inspected
+    # one detector pass per heavy timestamp, shared by both lanes
+    assert detector.calls == camera.shared.detector_calls
+    assert detector.calls <= 40

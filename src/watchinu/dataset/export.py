@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import shutil
 from collections import Counter, defaultdict
 from collections.abc import Sequence
@@ -25,7 +24,7 @@ import yaml
 
 from watchinu.dataset.manifest import FrameRecord
 from watchinu.dataset.visits import VisitLabel, frame_layout_label, frame_stage
-from watchinu.vision.geometry import crop_to_polygon, to_pixels
+from watchinu.vision.geometry import blank_regions, crop_to_polygon, to_pixels
 
 YoloBox = tuple[int, float, float, float, float]  # class, cx, cy, w, h (normalised)
 
@@ -101,8 +100,12 @@ def build_detection_dataset(
     class_names: list[str],
     crop_polygon: Sequence[tuple[float, float]] | None = None,
     include_duplicates: bool = False,
+    osd_masks: Sequence[Sequence[tuple[float, float]]] = (),
 ) -> dict[str, object]:
-    """Only frames with a label file are exported; an empty file is a verified negative."""
+    """Only frames with a label file are exported; an empty file is a verified negative.
+
+    The runtime detector sees full frames with the OSD overlays blanked, so that is the
+    default here too (``crop_polygon`` is only for experiments)."""
     images_root, labels_dir, out_dir = Path(images_root), Path(labels_dir), Path(out_dir)
     _prepare(out_dir)
     stats: dict[str, Counter[str]] = defaultdict(Counter)
@@ -116,6 +119,7 @@ def build_detection_dataset(
         image = cv2.imread(str(images_root / rec.image))
         if image is None:
             raise OSError(f"cannot read {images_root / rec.image}")
+        image = blank_regions(image, osd_masks)
         labels = read_yolo_labels(label_path)
         h, w = image.shape[:2]
         if crop_polygon is not None:
@@ -156,18 +160,26 @@ def build_detection_dataset(
     return card
 
 
+BayCrop = tuple[str | None, Sequence[tuple[float, float]] | None]  # (bay id, polygon)
+
+
 def build_classification_dataset(
     records: list[FrameRecord],
     visits: list[VisitLabel],
     images_root: str | Path,
     out_dir: str | Path,
     task: str,
-    crop_polygon: Sequence[tuple[float, float]] | None = None,
+    bays: Sequence[BayCrop] = ((None, None),),
     boundary_margin_s: float = 60.0,
     include_duplicates: bool = False,
-    link: bool = False,
+    osd_masks: Sequence[Sequence[tuple[float, float]]] = (),
 ) -> dict[str, object]:
-    """``task`` is ``stage`` or ``layout``. Ambiguous frames near transitions are skipped."""
+    """``task`` is ``stage`` or ``layout``; one sample per frame **per bay**.
+
+    Each bay's sample is that bay's crop (outside the polygon blacked out, as at runtime)
+    labelled from *that lane's* visits. ``bays=((None, None),)`` means the whole frame
+    with lane-agnostic labels. Ambiguous frames near transitions are skipped.
+    """
     if task not in ("stage", "layout"):
         raise ValueError("task must be 'stage' or 'layout'")
     images_root, out_dir = Path(images_root), Path(out_dir)
@@ -180,31 +192,36 @@ def build_classification_dataset(
             continue
         if rec.duplicate_of and not include_duplicates:
             continue
-        if task == "stage":
-            stage = frame_stage(rec.captured_at, rec.camera_id, visits, margin)
-            label = stage.value if stage is not None else None
-        else:
-            label = frame_layout_label(rec.captured_at, rec.camera_id, visits, margin)
-        if label is None:
+        labels: list[tuple[str | None, Sequence[tuple[float, float]] | None, str]] = []
+        for bay_id, polygon in bays:
+            if task == "stage":
+                stage = frame_stage(rec.captured_at, rec.camera_id, visits, margin, bay_id)
+                label = stage.value if stage is not None else None
+            else:
+                label = frame_layout_label(rec.captured_at, rec.camera_id, visits, margin, bay_id)
+            if label is not None:
+                labels.append((bay_id, polygon, label))
+        if not labels:
             continue
-        src = images_root / rec.image
-        dst = out_dir / rec.split / label / f"{rec.frame_id}.jpg"
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        if crop_polygon is None and link:
-            os.symlink(src.resolve(), dst)
-        else:
-            image = cv2.imread(str(src))
-            if image is None:
-                raise OSError(f"cannot read {src}")
-            if crop_polygon is not None:
-                h, w = image.shape[:2]
-                image, _ = crop_to_polygon(image, to_pixels(crop_polygon, w, h))
-            cv2.imwrite(str(dst), image, [cv2.IMWRITE_JPEG_QUALITY, 95])
-        stats[rec.split][label] += 1
+        image = cv2.imread(str(images_root / rec.image))
+        if image is None:
+            raise OSError(f"cannot read {images_root / rec.image}")
+        image = blank_regions(image, osd_masks)  # exactly what the runtime classifiers see
+        h, w = image.shape[:2]
+        for bay_id, polygon, label in labels:
+            sample = (
+                image if polygon is None else crop_to_polygon(image, to_pixels(polygon, w, h))[0]
+            )
+            name = f"{rec.frame_id}__{bay_id}.jpg" if bay_id else f"{rec.frame_id}.jpg"
+            dst = out_dir / rec.split / label / name
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            cv2.imwrite(str(dst), sample, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            stats[rec.split][label] += 1
         used.append(rec)
     card = {
         "task": f"classify-{task}",
-        "cropped_to_bay": crop_polygon is not None,
+        "bays": [b for b, _ in bays],
+        "cropped_to_bay": any(p is not None for _, p in bays),
         "boundary_margin_s": boundary_margin_s,
         "manifest_digest": _manifest_digest(used),
         "splits": {k: dict(v) for k, v in stats.items()},

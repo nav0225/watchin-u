@@ -7,7 +7,6 @@ identically, so every behaviour can be reproduced offline from a clip.
 from __future__ import annotations
 
 import logging
-from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -18,6 +17,7 @@ from watchinu.domain import BBox, Decision, Frame, Layout, Stage
 from watchinu.models.base import ModelSet
 from watchinu.runtime.aggregator import SlotObservations, TemplateSpec, VisitAggregator
 from watchinu.runtime.scheduler import HeavyScheduler
+from watchinu.runtime.shared import SharedFrames
 from watchinu.runtime.sinks import EventSink
 from watchinu.runtime.slots import observe_slots, out_of_view_slots, slot_image_points
 from watchinu.runtime.visit_machine import EventKind, VisitEvent, VisitState, VisitStateMachine
@@ -31,7 +31,7 @@ from watchinu.vision.geometry import (
     to_pixels,
     union_coverage,
 )
-from watchinu.vision.overlay import decode_jpeg, draw_boxes, draw_slots, encode_jpeg
+from watchinu.vision.overlay import draw_boxes, draw_slots, encode_jpeg
 from watchinu.vision.quality import assess, change_score, thumbnail
 
 log = logging.getLogger(__name__)
@@ -56,12 +56,6 @@ class _Geometry:
 
 
 @dataclass(slots=True)
-class _Buffered:
-    ts: float
-    jpeg: bytes
-
-
-@dataclass(slots=True)
 class _Evidence:
     score: float
     jpeg: bytes
@@ -75,9 +69,12 @@ class BayProcessor:
         models: ModelSet,
         sink: EventSink,
         id_factory: Callable[[], str] | None = None,
+        shared: SharedFrames | None = None,
     ) -> None:
         self.cfg = cfg
         self.bay = bay
+        self.shared = shared or SharedFrames(models.detector, cfg.schedule.lookback_s)
+        self.stage_model = models.stage_for(bay.id)
         self.templates = {
             Layout(layout): (name, template)
             for layout, (name, template) in cfg.templates_for(bay).items()
@@ -92,7 +89,6 @@ class BayProcessor:
         self._geom: _Geometry | None = None
         self._last_tick: float | None = None
         self._prev_thumb: np.ndarray | None = None
-        self._lookback: deque[_Buffered] = deque()
         self._heavy_ts: set[float] = set()
         self._best: _Evidence | None = None
         self._final_sent = False
@@ -121,7 +117,6 @@ class BayProcessor:
             self.cfg.decision, self._template_specs(), self.models.versions()
         )
         self.scheduler.reset()
-        self._lookback.clear()
         self._heavy_ts.clear()
         self._best = None
         self._prev_thumb = None
@@ -151,16 +146,13 @@ class BayProcessor:
                 self.aggregator.add_stage(ts, stage)
             # Only trucks carrying wrapped wire rods ever wake the heavy tier.
             if stage is Stage.WIRE_ROD:
-                self._watch(ts, crop, geom)
+                self._watch(ts, image, crop, geom)
 
-    def _watch(self, ts: float, crop: np.ndarray, geom: _Geometry) -> None:
+    def _watch(self, ts: float, image: np.ndarray, crop: np.ndarray, geom: _Geometry) -> None:
         thumb = thumbnail(crop)
         change = change_score(self._prev_thumb, thumb)
         self._prev_thumb = thumb
-
-        self._lookback.append(_Buffered(ts, encode_jpeg(crop, 95)))
-        while self._lookback and ts - self._lookback[0].ts > self.cfg.schedule.lookback_s:
-            self._lookback.popleft()
+        self.shared.remember(ts, image)
 
         opened_at = self.machine.opened_at
         assert opened_at is not None and self.aggregator is not None
@@ -168,28 +160,40 @@ class BayProcessor:
             return
         if self.scheduler.should_run(ts, opened_at, change):
             self.scheduler.mark_run(ts)
-            self._heavy(ts, crop, geom)
+            self._heavy(ts, image, geom)
 
-    def _heavy(self, ts: float, crop: np.ndarray, geom: _Geometry) -> None:
+    def _bay_detections(
+        self, ts: float, image: np.ndarray, geom: _Geometry
+    ) -> tuple[list[BBox], list[BBox]]:
+        """This bay's coils (centre inside the lane polygon) and the workers over it,
+        from the shared full-frame detections, in crop-local coordinates."""
+        x0, y0, x1, y1 = geom.rect
+        coils: list[BBox] = []
+        persons: list[BBox] = []
+        for det in self.shared.detections(ts, image):
+            local = det.box.shifted(-x0, -y0)
+            if det.label == self.cfg.models.coil_label:
+                cx, cy = local.center
+                if det.confidence >= self.cfg.decision.coil_min_confidence and point_in_polygon(
+                    cx, cy, geom.poly_local
+                ):
+                    coils.append(local)
+            elif det.label == self.cfg.models.person_label and local.intersection(
+                BBox(0, 0, x1 - x0, y1 - y0)
+            ):
+                persons.append(local)
+        return coils, persons
+
+    def _heavy(self, ts: float, image: np.ndarray, geom: _Geometry) -> None:
         if self.aggregator is None or ts in self._heavy_ts:
             return
+        crop = geom.crop(image)
         quality = assess(crop, geom.mask_local)
         if not quality.passes(self.cfg.quality):
             return
         self._heavy_ts.add(ts)
 
-        coils: list[BBox] = []
-        persons: list[BBox] = []
-        if self.models.detector is not None:
-            for det in self.models.detector.detect(crop):
-                cx, cy = det.box.center
-                if det.label == self.cfg.models.coil_label:
-                    if det.confidence >= self.cfg.decision.coil_min_confidence and (
-                        point_in_polygon(cx, cy, geom.poly_local)
-                    ):
-                        coils.append(det.box)
-                elif det.label == self.cfg.models.person_label:
-                    persons.append(det.box)
+        coils, persons = self._bay_detections(ts, image, geom)
         occlusion = union_coverage(persons, geom.mask_local)
 
         layout_probs = None
@@ -249,9 +253,12 @@ class BayProcessor:
         """Run the heavy tier on buffered frames from just before the tarp went on."""
         if self._geom is None:
             return
-        for item in list(self._lookback):
-            if item.ts < before_ts and item.ts not in self._heavy_ts:
-                self._heavy(item.ts, decode_jpeg(item.jpeg), self._geom)
+        for ts in self.shared.history(before_ts):
+            if ts in self._heavy_ts:
+                continue
+            image = self.shared.image_at(ts)
+            if image is not None:
+                self._heavy(ts, image, self._geom)
 
     def _emit(self, visit_id: str, kind: str, ts: float, before_ts: float | None) -> None:
         if self.aggregator is None:
@@ -279,9 +286,9 @@ class BayProcessor:
         return self._geom
 
     def _stage(self, crop: np.ndarray) -> tuple[Stage, float]:
-        if self.models.stage is None:
+        if self.stage_model is None:
             return Stage.UNKNOWN, 0.0
-        probs = self.models.stage.classify(crop)
+        probs = self.stage_model.classify(crop)
         label, p = max(probs.items(), key=lambda kv: kv[1])
         try:
             return Stage(label), p
@@ -303,7 +310,10 @@ class CameraProcessor:
         self.cfg = cfg
         self.sink = sink
         self.drift_checker = drift_checker
-        self.bays = [BayProcessor(cfg, bay, models, sink, id_factory) for bay in cfg.bays]
+        self.shared = SharedFrames(models.detector, cfg.schedule.lookback_s)
+        self.bays = [
+            BayProcessor(cfg, bay, models, sink, id_factory, self.shared) for bay in cfg.bays
+        ]
         self.suspended = False
         self._last_drift_check: float | None = None
 

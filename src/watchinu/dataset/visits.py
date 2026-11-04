@@ -14,6 +14,10 @@ CSV columns (timestamps ISO-8601; without an offset they are read in the plant t
 A blank product excludes that visit's open-bed frames from stage training.
 ``window`` = ``clip`` marks a short recording: ``arrived``/``departed`` are then just the
 recording bounds (the truck was there before and after), not real arrival/departure.
+``stage`` (optional) states what was visible throughout the row's window when the real
+transition times were not observed (e.g. a truck already tarped when recording started);
+it overrides the stage derived from the tarp columns. Rows with the same ``truck_ref``
+are one physical truck seen in several recordings and always share a split.
 """
 
 from __future__ import annotations
@@ -43,6 +47,7 @@ VISIT_LOG_COLUMNS = [
     "truck_ref",
     "notes",
     "window",
+    "stage",
 ]
 
 NOT_VISIBLE = "not_visible"
@@ -64,6 +69,7 @@ class VisitLabel(BaseModel):
     truck_ref: str | None = None
     notes: str | None = None
     clip: bool = False  # arrived/departed are recording bounds, not truck transitions
+    stage: Stage | None = None  # observed stage for the whole window (overrides tarp times)
 
     def contains(self, t: datetime) -> bool:
         return self.arrived <= t <= self.departed
@@ -72,6 +78,8 @@ class VisitLabel(BaseModel):
         """None when the stage cannot be labelled (open bed of unknown product)."""
         if not self.contains(t):
             return Stage.NO_TRUCK
+        if self.stage is not None:
+            return self.stage
         if self.tarp_done is not None and t >= self.tarp_done:
             return Stage.COVERED
         if self.tarp_start is not None and t >= self.tarp_start:
@@ -138,6 +146,7 @@ def load_visit_log(path: str | Path, default_tz: str = "Asia/Kolkata") -> list[V
                     truck_ref=(row.get("truck_ref") or "").strip() or None,
                     notes=(row.get("notes") or "").strip() or None,
                     clip=(row.get("window") or "").strip().lower() == "clip",
+                    stage=(row.get("stage") or "").strip() or None,
                 )
             )
     ids = [v.visit_id for v in out]
@@ -165,8 +174,9 @@ def assign_visits(records: list[FrameRecord], visits: list[VisitLabel]) -> int:
 
 
 def visit_groups(visits: list[VisitLabel]) -> dict[str, str]:
-    """visit_id -> group id. Visits overlapping in time on one camera share a group,
-    because their frames show both trucks and must land in the same split."""
+    """visit_id -> group id for leakage-safe splits. Rows share a group when they overlap
+    in time on one camera (their frames show both trucks) or have the same ``truck_ref``
+    (one truck seen in several recordings)."""
     parent = {v.visit_id: v.visit_id for v in visits}
 
     def find(x: str) -> str:
@@ -181,15 +191,32 @@ def visit_groups(visits: list[VisitLabel]) -> dict[str, str]:
             if b.camera_id != a.camera_id or b.arrived > a.departed:
                 continue
             parent[find(b.visit_id)] = find(a.visit_id)
+    by_truck: dict[str, str] = {}
+    for v in visits:
+        if v.truck_ref:
+            first = by_truck.setdefault(v.truck_ref, v.visit_id)
+            parent[find(v.visit_id)] = find(first)
     return {v.visit_id: find(v.visit_id) for v in visits}
 
 
+def _in_scope(v: VisitLabel, camera_id: str, bay_id: str | None) -> bool:
+    return v.camera_id == camera_id and (bay_id is None or v.bay_id == bay_id)
+
+
 def frame_stage(
-    t: datetime, camera_id: str, visits: list[VisitLabel], margin: timedelta
+    t: datetime,
+    camera_id: str,
+    visits: list[VisitLabel],
+    margin: timedelta,
+    bay_id: str | None = None,
 ) -> Stage | None:
-    """Stage label at time ``t``; None when within ``margin`` of a transition (ambiguous)."""
+    """Stage label at time ``t``; None when within ``margin`` of a transition (ambiguous).
+
+    With ``bay_id`` only that lane's visits count: an ingot truck in one lane and a
+    wire-rod truck in the other at the same moment give two different labels.
+    """
     for v in visits:
-        if v.camera_id != camera_id:
+        if not _in_scope(v, camera_id, bay_id):
             continue
         if any(abs(t - tr) < margin for tr in v.transitions()):
             return None
@@ -199,14 +226,18 @@ def frame_stage(
 
 
 def frame_layout_label(
-    t: datetime, camera_id: str, visits: list[VisitLabel], margin: timedelta
+    t: datetime,
+    camera_id: str,
+    visits: list[VisitLabel],
+    margin: timedelta,
+    bay_id: str | None = None,
 ) -> str | None:
     """Layout class for the layout classifier, ``not_visible`` when no load is visible,
     None when unusable (no truck, unknown layout, or near a transition)."""
-    stage = frame_stage(t, camera_id, visits, margin)
+    stage = frame_stage(t, camera_id, visits, margin, bay_id)
     if stage is None or stage is Stage.NO_TRUCK:
         return None
-    visit = next(v for v in visits if v.camera_id == camera_id and v.contains(t))
+    visit = next(v for v in visits if _in_scope(v, camera_id, bay_id) and v.contains(t))
     if stage is not Stage.WIRE_ROD:
         # Tarp on, empty bed or ingots: no wire-rod arrangement to classify.
         return NOT_VISIBLE
@@ -261,6 +292,7 @@ def visit_log_from_clips(
                     "",
                     f"clip {Path(video).name}",
                     "clip",
+                    "",  # stage: fill if it is constant over the clip (e.g. covered)
                 ]
             )
     return len(spans)

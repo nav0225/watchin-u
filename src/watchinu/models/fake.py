@@ -44,9 +44,10 @@ class VisitLogStageOracle:
     name = "visit-log-oracle"
     version = "oracle"
 
-    def __init__(self, visits: list[VisitLabel], camera_id: str) -> None:
+    def __init__(self, visits: list[VisitLabel], camera_id: str, bay_id: str | None = None) -> None:
         self._visits = visits
         self._camera_id = camera_id
+        self._bay_id = bay_id
         self._now: datetime | None = None
 
     def set_time(self, ts: float) -> None:
@@ -55,5 +56,5 @@ class VisitLogStageOracle:
     def classify(self, image: np.ndarray) -> dict[str, float]:
         if self._now is None:
             return {Stage.UNKNOWN.value: 1.0}
-        stage = frame_stage(self._now, self._camera_id, self._visits, timedelta(0))
+        stage = frame_stage(self._now, self._camera_id, self._visits, timedelta(0), self._bay_id)
         return {(stage or Stage.UNKNOWN).value: 1.0}

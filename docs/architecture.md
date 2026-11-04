@@ -17,6 +17,14 @@ the tarpaulin goes on, it records:
 Observed and inferred counts are never merged. A hidden coil is reported as inferred,
 not seen.
 
+## The scene
+
+One fixed camera (verified: all 2026-11-04 clips align within 0.5 px) sees **two lanes**:
+the **far** lane along the shed wall, and the **near** lane on the road side, whose trucks run off
+the left and bottom image edges. Each lane is a bay with its own polygon, bed homography,
+state machine and decisions. Both lanes are often busy at once, for example an ingot truck
+in one and a wire-rod truck in the other.
+
 ## Data flow
 
 ```mermaid
@@ -26,10 +34,10 @@ flowchart LR
     GUARD -->|view moved| ALERT[Alert + suspend]
     GUARD -->|ok| OSD[Blank OSD overlays]
     OSD --> BAY[Per-bay crop<br/>outside polygon blacked out]
-    BAY --> LIGHT[Light tier: stage classifier<br/>every 5 s idle / 10 s in visit]
-    LIGHT --> SM[Visit state machine]
-    BAY --> LB[Look-back buffer<br/>last 3 min, JPEG]
-    SM -->|scheduler wakes| HEAVY[Heavy tier: detector + layout classifier]
+    BAY --> LIGHT[Light tier: stage classifier per lane<br/>every 5 s idle / 10 s in visit]
+    LIGHT --> SM[Visit state machine per lane]
+    OSD --> LB[Shared look-back buffer<br/>last 3 min, full frames]
+    SM -->|scheduler wakes| HEAVY[Heavy tier: detector once per frame on the full frame,<br/>coils assigned to a lane by box centre;<br/>layout classifier per lane crop]
     LB -->|tarp detected| HEAVY
     HEAVY --> AGG[Visit aggregator<br/>layout votes + slot board]
     AGG --> DEC[Provisional ~2 min / Final before tarp]
@@ -110,14 +118,22 @@ three observations:
 | Workers covering the bed | Occlusion over 40% skips the layout vote. Slots under workers stay unseen. |
 | Two trucks in frame | Each bay has its own polygon and state machine. Outside-polygon pixels are blacked out. |
 
+## Why the detector runs on the full frame
+
+The lanes overlap in perspective, because near-lane coil tops reach up into the far lane's
+region. Running the detector per lane crop would double the compute and cut boundary coils
+in half. It runs at most once per frame timestamp, on the full frame, and the result is cached
+for every bay (`runtime/shared.py`). Each bay keeps the coils whose **centre** lies in its
+polygon. The light stage classifier and the layout classifier stay per lane, on the lane crop.
+
 ## Code map
 
 | Path | Responsibility |
 |---|---|
 | `io/` | RTSP reader (reconnect, stall detection), latest-frame buffer, video replay |
 | `vision/` | geometry and homography, quality metrics, dHash, drift guard, overlays |
-| `runtime/` | visit state machine, scheduler, slots, aggregator, pipeline, sinks |
-| `models/` | model protocols, Ultralytics backend, fakes and visit-log oracle |
+| `runtime/` | visit state machine, scheduler, slots, aggregator, pipeline, shared per-frame detections, sinks |
+| `models/` | model protocols, Ultralytics backend, bootstrap pre-labeller, fakes and visit-log oracle |
 | `store/` | SQLAlchemy schema, repository, DB sink (migrations in `/migrations`) |
 | `dataset/` | capture, extract, dedupe, visit log, splits, exports, pre-labelling |
 | `eval/` | visit-level metrics against the visit log |

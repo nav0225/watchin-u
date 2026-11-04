@@ -39,7 +39,8 @@ Expect about 66 GB per day for the main stream and 11 GB per day for the sub-str
 configured bitrates (VBR, usually less). Segments are 5-minute `.mkv` files named with their start time.
 
 **B. Time-lapse of whole visits** (best value per GB). One JPEG every 10 s covers a
-40-minute visit in 240 frames, at roughly 1/6 to 1/12 of the video storage:
+40-minute visit in 240 frames, at about 1/7 of the video storage (measured: ~1 MB per
+frame, ~0.36 GB/hour, versus ~2.5 GB/hour of video):
 
 ```bash
 watchinu capture --config configs/camera01.yaml --mode timelapse --every-s 10 --out data/raw
@@ -67,10 +68,14 @@ over-exposure and dHash.
 ## 3. Remove near-duplicates
 
 ```bash
-watchinu dedupe --manifest data/frames/manifest.jsonl --max-distance 6
+watchinu dedupe --manifest data/frames/manifest.jsonl --config configs/camera01.yaml
 ```
 
-Duplicates are only *marked* (`duplicate_of`), never deleted. Exports skip them by default.
+Rule, per video against the last kept frame: keep if the scene changed (largest per-region
+change at least 0.03) and at least 3 s have passed, or after 10 s regardless. Static clips give a
+frame every 10 s, and busy ones (tarping, lacing) give more. The ticking OSD clock is blanked
+first. On 2026-11-04 this kept 86 of 393 frames. A whole-frame perceptual hash had
+collapsed 365 of them, including busy clips. Duplicates are only *marked*, never deleted.
 
 ## 4. Write the visit log (most valuable labelling hour you will spend)
 
@@ -93,13 +98,21 @@ independent ground truth for the inferred-count logic.
 
 ## 5. Split
 
+**Rows are per lane:** one row per truck per lane (`bay_id` `far` / `near`). For partial
+recordings use `window=clip`, and `stage` if it is constant over the recording. Give one
+physical truck the same `truck_ref` in every row; such rows always share a split.
+
 ```bash
 watchinu split --manifest data/frames/manifest.jsonl --visit-log data/visit_log.csv \
   --val 0.15 --test 0.2 --seed 42 --frozen-test data/gold_test_visits.txt
 ```
 
-Overlapping visits (two bays at once) stay together. Frames outside visits are grouped by
-day. Write `gold_test_visits.txt` once, after the first split. From then on those visits stay in
+Overlapping visits (two bays at once) and rows of the same truck stay together. Frames
+outside visits are grouped by day. On a day where the lanes are busy back-to-back this makes
+the whole day **one group**, which is correct, and it can't be split. To bootstrap a first
+model from such a single session, use `--group-by clip --test 0`. Each recording stays
+whole, but one truck can then appear in train and val, so val scores are optimistic. Take
+the gold test set from other days. Write `gold_test_visits.txt` once, after the first split. From then on those visits stay in
 test as the dataset grows.
 
 ## 6. Label boxes in CVAT (self-hosted; footage does not leave the plant network)
@@ -108,25 +121,30 @@ test as the dataset grows.
    (prioritise variety across time of day, weather, truck type and layout).
 2. **Pre-label** so annotators correct instead of draw:
    ```bash
-   # zero-shot bootstrap (open-vocabulary model)
-   watchinu prelabel --weights yolov8s-worldv2.pt --images data/frames/images \
-     --prompts "wrapped wire coil=coil,person=person" --out data/prelabel_v0.zip
-   # once ~200 frames are labelled and a v0 detector is trained:
-   watchinu prelabel --weights runs/detect/coil-v0/weights/best.pt --images ... --out ...
+   # no labels yet: YOLOE prompt-free proposals + the BALCO wrap colour test (+ COCO persons)
+   watchinu prelabel --method wrap-colour --manifest data/frames/manifest.jsonl \
+     --out data/cvat/prelabel.zip --images-zip data/cvat/images.zip --device 0
+   # once ~200 frames are corrected and a v0 detector is trained:
+   watchinu prelabel --method weights --weights runs/detect-v1/weights/best.pt --manifest ...
    ```
-   Import the zip in CVAT as **YOLO 1.1**.
+   Create the CVAT task from `images.zip`, then import `prelabel.zip` as **YOLO 1.1**.
+   Text-prompted open-vocabulary models (`--prompts`) need a CLIP install. Don't use them
+   on this footage: they named the coils "sleeping bag" and "laundry". The wrap colour test
+   is what separates coils from ingots and tarps.
 3. Follow `docs/labelling_guide.md`. Double-label 10–15% of frames to measure agreement.
 4. Export as **YOLO 1.1** and unzip the `.txt` files into `data/labels/`.
 
 ## 7. Export training datasets (cropped exactly like the runtime)
 
 ```bash
+# detector: full frames, OSD blanked (exactly what the runtime detector sees)
 watchinu export-detect --manifest data/frames/manifest.jsonl --labels data/labels \
-  --out data/ds/detect --classes coil,person --config configs/camera01.yaml --bay left
+  --out data/ds/detect --classes coil,person --config configs/camera01.yaml
+# classifiers: one crop per lane, labelled from that lane's visits
 watchinu export-cls --manifest data/frames/manifest.jsonl --visit-log data/visit_log.csv \
-  --task stage --out data/ds/stage --config configs/camera01.yaml --bay left
+  --task stage --out data/ds/stage --config configs/camera01.yaml
 watchinu export-cls --manifest data/frames/manifest.jsonl --visit-log data/visit_log.csv \
-  --task layout --out data/ds/layout --config configs/camera01.yaml --bay left
+  --task layout --out data/ds/layout --config configs/camera01.yaml
 ```
 
 Each output has a `dataset_card.json` (counts per split and class, plus a manifest digest).

@@ -1,0 +1,17 @@
+visit_id,camera_id,bay_id,arrived,loading_start,tarp_start,tarp_done,departed,product,layout,coil_count,truck_ref,notes,window,stage
+20261104-101552-far,cam01,far,2026-11-04T10:15:51+05:30,,,,2026-11-04T10:16:33+05:30,wire_rod,linear,10,2026-11-04/V1,DRAFT from video review - confirm. lacing; 2x5 all visible,clip,wire_rod
+20261104-103836-far,cam01,far,2026-11-04T10:38:35+05:30,,,,2026-11-04T10:38:59+05:30,wire_rod,linear,10,2026-11-04/V1,"DRAFT from video review - confirm. yellow tarp on, ropes being tied",clip,covered
+20261104-105933-far,cam01,far,2026-11-04T10:59:32+05:30,,,,2026-11-04T10:59:48+05:30,wire_rod,linear,10,2026-11-04/V1,"DRAFT from video review - confirm. yellow tarp, no activity",clip,covered
+20261104-105933-near,cam01,near,2026-11-04T10:59:32+05:30,,,,2026-11-04T10:59:48+05:30,ingot,,,2026-11-04/V2,DRAFT from video review - confirm. ingot stacks + loose ingots,clip,other_load
+20261104-112136-far,cam01,far,2026-11-04T11:21:35+05:30,,,,2026-11-04T11:23:22+05:30,wire_rod,criss_cross,14,2026-11-04/V3,DRAFT from video review - confirm. staggered coils; rear coil cut by right image edge,clip,wire_rod
+20261104-112136-near,cam01,near,2026-11-04T11:21:35+05:30,,,,2026-11-04T11:23:22+05:30,ingot,,,2026-11-04/V2,DRAFT from video review - confirm.,clip,other_load
+20261104-112458-far,cam01,far,2026-11-04T11:24:57+05:30,,,,2026-11-04T11:25:47+05:30,wire_rod,criss_cross,14,2026-11-04/V3,DRAFT from video review - confirm.,clip,wire_rod
+20261104-112458-near,cam01,near,2026-11-04T11:24:57+05:30,,,,2026-11-04T11:25:47+05:30,ingot,,,2026-11-04/V2,DRAFT from video review - confirm.,clip,other_load
+20261104-120244-far,cam01,far,2026-11-04T12:02:43+05:30,,,,2026-11-04T12:02:56+05:30,wire_rod,criss_cross,14,2026-11-04/V3,DRAFT from video review - confirm. worker lacing,clip,wire_rod
+20261104-120244-near,cam01,near,2026-11-04T12:02:43+05:30,,,,2026-11-04T12:02:56+05:30,ingot,,,2026-11-04/V2,DRAFT from video review - confirm. worker on ingot truck,clip,other_load
+20261104-120644-far,cam01,far,2026-11-04T12:06:43+05:30,,,,2026-11-04T12:08:02+05:30,wire_rod,criss_cross,14,2026-11-04/V3,DRAFT from video review - confirm.,clip,wire_rod
+20261104-120644-near,cam01,near,2026-11-04T12:06:43+05:30,,,,2026-11-04T12:08:02+05:30,ingot,,,2026-11-04/V2,DRAFT from video review - confirm. black tarp pulled over ingots,clip,covering
+20261104-123133-far,cam01,far,2026-11-04T12:31:32+05:30,,,,2026-11-04T12:31:52+05:30,wire_rod,criss_cross,14,2026-11-04/V3,DRAFT from video review - confirm. workers on top,clip,wire_rod
+20261104-123133-near,cam01,near,2026-11-04T12:31:32+05:30,,,,2026-11-04T12:31:52+05:30,wire_rod,linear,,2026-11-04/V4,"DRAFT from video review - confirm. 2 columns, rear row below image; count not visible",clip,wire_rod
+20261104-123401-far,cam01,far,2026-11-04T12:34:00+05:30,,,,2026-11-04T12:34:52+05:30,wire_rod,criss_cross,14,2026-11-04/V3,DRAFT from video review - confirm. black tarp being pulled,clip,covering
+20261104-123401-near,cam01,near,2026-11-04T12:34:00+05:30,,,,2026-11-04T12:34:52+05:30,wire_rod,linear,,2026-11-04/V4,DRAFT from video review - confirm.,clip,wire_rod

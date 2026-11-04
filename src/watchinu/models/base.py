@@ -35,6 +35,11 @@ class ModelSet:
     layout: Classifier | None = None
     detector: Detector | None = None
     extra_versions: dict[str, str] = field(default_factory=dict)
+    # Optional per-bay stage models (e.g. the visit-log oracle, which answers per lane).
+    stage_by_bay: dict[str, Classifier] = field(default_factory=dict)
+
+    def stage_for(self, bay_id: str) -> Classifier | None:
+        return self.stage_by_bay.get(bay_id, self.stage)
 
     def versions(self) -> dict[str, str]:
         out = dict(self.extra_versions)
