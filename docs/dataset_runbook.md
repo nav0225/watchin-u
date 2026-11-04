@@ -134,6 +134,17 @@ test as the dataset grows.
 3. Follow `docs/labelling_guide.md`. Double-label 10–15% of frames to measure agreement.
 4. Export as **YOLO 1.1** and unzip the `.txt` files into `data/labels/`.
 
+## 6b. Audit the labels before every training run
+
+```bash
+watchinu label-audit --manifest data/frames/manifest.jsonl --labels data/labels \
+  --visit-log data/visit_log.csv --config configs/camera01.yaml
+```
+
+The audit reports coils per lane and recording next to the visit log, and flags coils in an
+empty lane, coils on a non-wire-rod or covered truck, and more coils than `coil_count`.
+Run it on pre-labels too, to judge how much correcting they need.
+
 ## 7. Export training datasets (cropped exactly like the runtime)
 
 ```bash

@@ -140,3 +140,22 @@ def test_classifier_dataset_trains_and_backend_parses(tmp_path, monkeypatch):
     )
     assert report["n"] > 0 and report["accuracy"] is not None
     assert "confusion (rows = truth" in to_markdown(report)
+
+
+def test_wrap_colour_proposer_runs_on_the_real_model(tmp_path, monkeypatch):
+    """Exercises the real YOLOE mask polygons -> quarter-scale colour test path."""
+    from watchinu.models.prelabelers import WrapColourCoilProposer
+
+    weights = Path(__file__).resolve().parents[1] / "yoloe-11s-seg-pf.pt"
+    monkeypatch.chdir(tmp_path)  # downloads here if the repo has no local copy
+    proposer = WrapColourCoilProposer(
+        weights=str(weights) if weights.exists() else "yoloe-11s-seg-pf.pt"
+    )
+    img = np.full((720, 1280, 3), 70, np.uint8)
+    for k in range(3):  # three wrap-coloured "coils" (white film, blue band)
+        x = 200 + 300 * k
+        cv2.ellipse(img, (x, 360), (110, 90), 0, 0, 360, (230, 230, 230), -1)
+        cv2.ellipse(img, (x, 400), (110, 50), 0, 0, 180, (200, 60, 20), -1)
+    out = proposer.detect(img)
+    assert all(d.label == "coil" for d in out)
+    assert all(0 <= d.box.x1 < d.box.x2 <= 1280 and 0 <= d.box.y1 < d.box.y2 <= 720 for d in out)

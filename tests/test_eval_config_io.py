@@ -175,3 +175,62 @@ def test_env_file_loader_never_overrides_real_environment(tmp_path, monkeypatch)
         "plain",
         "from-env",
     )
+
+
+def test_label_audit_counts_coils_per_lane_and_flags_mismatches(tmp_path):
+    import zipfile as _zip
+
+    from watchinu.dataset.manifest import FrameRecord
+    from watchinu.eval.label_audit import audit_labels, read_yolo_labels_any
+    from watchinu.eval.label_audit import to_markdown as audit_md
+
+    left = {
+        "id": "left",
+        "polygon": [[0, 0], [0.5, 0], [0.5, 1], [0, 1]],
+        "bed_quad": [[0.05, 0.95], [0.45, 0.95], [0.45, 0.05], [0.05, 0.05]],
+        "slot_templates": {"linear": "std_2x5"},
+    }
+    right = {**left, "id": "right", "polygon": [[0.5, 0], [1, 0], [1, 1], [0.5, 1]]}
+    cfg = make_config(bays=[left, right])
+    log = tmp_path / "v.csv"
+    log.write_text(
+        "visit_id,camera_id,bay_id,arrived,loading_start,tarp_start,tarp_done,departed,"
+        "product,layout,coil_count,truck_ref,notes,window,stage\n"
+        "a,cam01,left,2026-11-04T10:00:00,,,,2026-11-04T10:01:00,wire_rod,linear,2,T1,,clip,\n"
+        "b,cam01,right,2026-11-04T10:00:00,,,,2026-11-04T10:01:00,ingot,,,T2,,clip,\n"
+    )
+    visits = load_visit_log(log)
+    recs = []
+    with _zip.ZipFile(tmp_path / "labels.zip", "w") as zf:
+        for i in range(3):
+            stem = f"clip1_{i}"
+            recs.append(
+                FrameRecord(
+                    frame_id=stem,
+                    image=f"images/{stem}.jpg",
+                    video="clip1.mp4",
+                    camera_id="cam01",
+                    stream="main",
+                    pts_s=i,
+                    frame_index=i,
+                    captured_at=datetime.fromisoformat(f"2026-11-04T10:00:1{i}+05:30"),
+                    width=200,
+                    height=100,
+                    blur_var=100,
+                    brightness=100,
+                    overexposed_fraction=0,
+                    dhash="0" * 16,
+                )
+            )
+            # two coils in the left lane, one (wrong) coil on the ingot truck, one person
+            zf.writestr(
+                f"obj_train_data/{stem}.txt",
+                "0 0.1 0.5 0.1 0.2\n0 0.3 0.5 0.1 0.2\n0 0.8 0.5 0.1 0.2\n1 0.2 0.2 0.05 0.1\n",
+            )
+    stats = {
+        s.lane: s
+        for s in audit_labels(recs, read_yolo_labels_any(tmp_path / "labels.zip"), visits, cfg)
+    }
+    assert (stats["left"].coils_median, stats["left"].flag) == (2.0, "")
+    assert (stats["right"].coils_max, stats["right"].flag) == (1, "coils on a non-wire-rod truck")
+    assert "| clip1 | left | T1 | wire_rod |" in audit_md(list(stats.values()))

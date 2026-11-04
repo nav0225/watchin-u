@@ -211,6 +211,9 @@ def cmd_prelabel(a: argparse.Namespace) -> int:
 
     label_map: dict[str, str] = {}
     detector: Detector
+    min_conf = (
+        a.min_conf if a.min_conf is not None else (0.0 if a.method == "wrap-colour" else 0.15)
+    )
     if a.method == "wrap-colour":
         from watchinu.models.prelabelers import (
             CompositeDetector,
@@ -231,7 +234,7 @@ def cmd_prelabel(a: argparse.Namespace) -> int:
         detector = UltralyticsDetector(
             a.weights,
             imgsz=a.imgsz,
-            conf=a.min_conf,
+            conf=min_conf,
             device=a.device,
             prompts=list(label_map) or None,
         )
@@ -246,7 +249,7 @@ def cmd_prelabel(a: argparse.Namespace) -> int:
     else:
         log.error("pass --manifest (non-duplicate frames only) or --images")
         return 2
-    n = prelabel_to_cvat_zip(detector, images, a.classes.split(","), a.out, label_map, a.min_conf)
+    n = prelabel_to_cvat_zip(detector, images, a.classes.split(","), a.out, label_map, min_conf)
     log.info("%d boxes on %d images -> %s", n, len(images), a.out)
     if a.images_zip:
         write_flat_images_zip(images, a.images_zip)
@@ -416,6 +419,26 @@ def cmd_evaluate_model(a: argparse.Namespace) -> int:
     out.with_suffix(".md").write_text(md)
     print(md)
     log.info("report saved to %s.{json,md}", out)
+    return 0
+
+
+def cmd_label_audit(a: argparse.Namespace) -> int:
+    from watchinu.config import load_config
+    from watchinu.dataset.manifest import read_manifest
+    from watchinu.dataset.visits import load_visit_log
+    from watchinu.eval.label_audit import audit_labels, read_yolo_labels_any, to_markdown
+
+    records = [r for r in read_manifest(a.manifest) if a.all_frames or r.duplicate_of is None]
+    stats = audit_labels(
+        records,
+        read_yolo_labels_any(a.labels),
+        load_visit_log(a.visit_log, a.timezone),
+        load_config(a.config),
+    )
+    md = to_markdown(stats)
+    if a.out:
+        Path(a.out).write_text(md)
+    print(md)
     return 0
 
 
@@ -619,7 +642,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--classes", default="coil,person")
     s.add_argument("--prompts", help='open-vocab prompts: "wrapped wire coil=coil,person=person"')
     s.add_argument("--imgsz", type=int, default=1280)
-    s.add_argument("--min-conf", type=float, default=0.15)
+    s.add_argument(
+        "--min-conf",
+        type=float,
+        help="drop boxes below this score (default: 0.15 for --method weights; none for "
+        "wrap-colour, whose proposal scores are meaningless - the colour test is the gate)",
+    )
     s.add_argument("--device", default="cpu")
 
     s = add("train", cmd_train, "fine-tune a pretrained model (records provenance)")
@@ -662,6 +690,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--imgsz", type=int, default=1280)
     s.add_argument("--device", default="cpu")
     s.add_argument("--out", help="report path without suffix (default: next to the run)")
+
+    s = add("label-audit", cmd_label_audit, "coils per lane and recording vs the visit log")
+    s.add_argument("--manifest", required=True)
+    s.add_argument("--labels", required=True, help="CVAT YOLO 1.1 zip or folder of .txt")
+    s.add_argument("--visit-log", required=True)
+    s.add_argument("--config", required=True)
+    s.add_argument("--all-frames", action="store_true", help="include near-duplicates")
+    s.add_argument("--out")
+    add_tz(s)
 
     s = add("render-config", cmd_render_config, "draw configured geometry on a frame")
     s.add_argument("--config", required=True)

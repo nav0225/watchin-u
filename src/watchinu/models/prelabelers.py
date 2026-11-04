@@ -104,6 +104,8 @@ def select_coils(
 class WrapColourCoilProposer:
     """Detector: YOLOE prompt-free instance proposals + the wrap colour test."""
 
+    STATS_SCALE = 4
+
     def __init__(
         self,
         weights: str = "yoloe-11s-seg-pf.pt",
@@ -120,20 +122,33 @@ class WrapColourCoilProposer:
         self.version = "bootstrap"
 
     def detect(self, image: np.ndarray) -> list[Detection]:
+        # Colour statistics do not need full-resolution masks: rasterise each proposal's
+        # polygon at 1/STATS_SCALE on a downscaled image (retina masks for ~100 proposals
+        # on a 2560x1440 frame dominate the run time otherwise).
         res = self._model.predict(
-            image,
-            imgsz=self._imgsz,
-            conf=self._conf,
-            device=self._device,
-            retina_masks=True,
-            verbose=False,
+            image, imgsz=self._imgsz, conf=self._conf, device=self._device, verbose=False
         )[0]
         if res.boxes is None or res.masks is None:
             return []
-        boxes = [BBox(*(float(v) for v in b)) for b in res.boxes.xyxy.cpu().numpy()]
+        k = self.STATS_SCALE
+        h, w = image.shape[:2]
+        small = cv2.resize(image, (w // k, h // k), interpolation=cv2.INTER_AREA)
+        sh, sw = small.shape[:2]
+        boxes, masks = [], []
+        for xyxy, polys in zip(res.boxes.xyxy.cpu().numpy(), res.masks.xy, strict=True):
+            mask = np.zeros((sh, sw), np.uint8)
+            if len(polys):
+                cv2.fillPoly(mask, [np.round(np.asarray(polys) / k).astype(np.int32)], 1)
+            masks.append(mask.astype(bool))
+            boxes.append(BBox(*(float(v) / k for v in xyxy)))
         confs = res.boxes.conf.cpu().numpy().tolist()
-        masks = list(res.masks.data.cpu().numpy() > 0.5)
-        return select_coils(image, boxes, confs, masks, self._colour)
+        found = select_coils(small, boxes, confs, masks, self._colour)
+        return [
+            Detection(
+                d.label, d.confidence, BBox(d.box.x1 * k, d.box.y1 * k, d.box.x2 * k, d.box.y2 * k)
+            )
+            for d in found
+        ]
 
 
 class LabelFilter:

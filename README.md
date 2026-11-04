@@ -22,9 +22,10 @@ machine opens a visit when a truck stops, and the detector wakes only a few doze
 | Runtime: ingest, state machine, scheduler, slots, decisions, drift guard | built and tested on synthetic footage |
 | Storage: SQL Server / PostgreSQL / SQLite schema, migrations, append-only decisions, outbox, `db-check` | built; tested on SQLite, SQL Server DDL verified offline |
 | Dataset tooling: capture → extract → dedupe → visit log → split → export → pre-label | built and tested |
-| Models | **not trained yet**: Colab notebooks ready (`notebooks/`), waiting for labels |
+| Models | **not trained yet**: Colab notebooks ready (`notebooks/`); bootstrap pre-labeller works on real footage |
 | Deployment | Windows/Linux service, SQL Server / PostgreSQL ([docs/deployment.md](docs/deployment.md)) |
-| Geometry in `configs/camera01.yaml` | **placeholder**: calibrate on a real main-stream frame |
+| Geometry in `configs/camera01.yaml` | calibrated on real footage: two lanes (`far`, `near`), see [data report 2026-11-04](docs/data_reports/2026-11-04.md) |
+| Labels | draft per-lane visit log for 2026-11-04 in `labels/`, pre-labelled CVAT bundle to correct |
 | ERP / weighbridge integration, live alerts | phase 2 |
 
 ## Quick start
